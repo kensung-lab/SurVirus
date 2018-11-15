@@ -1,9 +1,10 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.5)
 project(SurVirus)
 
 set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pthread")
 
-include_directories(/usr/local/include)
+include_directories(htslib-1.7/include)
 
 set(ISOLATE_RELEVANT_PAIRS_SRC isolate_relevant_pairs.cpp sam_utils.h config.h libs/cptl_stl.h)
 add_executable(isolate_relevant_pairs ${ISOLATE_RELEVANT_PAIRS_SRC})
@@ -17,7 +18,7 @@ add_executable(reads_categorizer ${READS_CATEGORIZER_SRC})
 set(REMAPPER_SRC libs/ssw.c libs/ssw_cpp.cpp remapper.cpp sam_utils.h config.h libs/cptl_stl.h cluster.h)
 add_executable(remapper ${REMAPPER_SRC})
 
-find_library(HTS_LIB hts)
+find_library(HTS_LIB hts htslib-1.7/lib)
 target_link_libraries(isolate_relevant_pairs "${HTS_LIB}")
 target_link_libraries(filter_by_qname "${HTS_LIB}")
 target_link_libraries(reads_categorizer "${HTS_LIB}")
