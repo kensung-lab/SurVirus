@@ -126,9 +126,6 @@ void categorize(int id, std::string contig, std::string bam_fname, int target_le
             int ok = sam_write1(anchor_writer, header, read);
             std::string seq = get_sequence(read);
             *clip_writer << ">" << bam_get_qname(read) << "\n";
-            if (std::string(bam_get_qname(read)) == "ERR093637.50573377") {
-                std::cout << contig << " ERR093637.50573377" << " " << anchor_writer->fn << std::endl;
-            }
             if (is_left_clipped(read)) {
                 *clip_writer << seq.substr(0, get_left_clip_len(read)) << "\n";
             } else if (is_right_clipped(read)) {
@@ -176,7 +173,7 @@ void categorize(int id, std::string contig, std::string bam_fname, int target_le
 //                    read_seq_chr[read->core.l_qseq] = '\0';
 //                    mtx.lock();
 //                    if (bam_is_rev(read)) {
-//                        rc(read_seq_chr);
+//                        get_rc(read_seq_chr);
 //                    }
 //                    std::string qname = bam_get_qname(read);
 //                    if (is_samechr(read)) {
@@ -198,7 +195,7 @@ std::string print_fq(bam1_t* r) {
     std::stringstream ss;
     ss << "@" << bam_get_qname(r) << "\n";
     std::string seq = get_sequence(r);
-    if (bam_is_rev(r)) rc(seq);
+    if (bam_is_rev(r)) get_rc(seq);
     ss << seq << "\n";
     ss << "+" << "\n";
     for (int i = 0; i < r->core.l_qseq; i++) {

@@ -64,6 +64,8 @@ std::mutex mtx;
 config_t config;
 std::ofstream fout;
 
+std::unordered_set<std::string> virus_names;
+
 
 inline ull mask(ull kmer, int seg_n) {
     ull first_n_segs_mask = (1ll << SEG_BITS*seg_n)-1;
@@ -120,8 +122,11 @@ void isolate(int id, char* bam_fname, int t_num) {
 
     open_samFile_t* bam_file = open_samFile(bam_fname, false);
 
+    std::string t_name = bam_file->header->target_name[t_num];
+    bool is_virus = virus_names.count(t_name);
+
     char region[1000];
-    sprintf(region, "%s:%d-%d", bam_file->header->target_name[t_num], 1, bam_file->header->target_len[t_num]);
+    sprintf(region, "%s:%d-%d", t_name.c_str(), 1, bam_file->header->target_len[t_num]);
 
     mtx.lock();
     std::cerr << "Detecting relevant pairs for " << bam_file->header->target_name[t_num] << std::endl;
@@ -132,7 +137,7 @@ void isolate(int id, char* bam_fname, int t_num) {
     bam1_t* read = bam_init1();
     while (sam_itr_next(bam_file->file, iter, read) >= 0) {
         uint32_t* c = bam_get_cigar(read);
-        if (bam_cigar_op(c[0]) == BAM_CMATCH && read->core.n_cigar == 1) continue; // ignore if all matches
+        if (!is_virus && bam_cigar_op(c[0]) == BAM_CMATCH && read->core.n_cigar == 1) continue; // ignore if all matches
 
         if (read->core.flag & BAM_FDUP) continue;
 
@@ -191,8 +196,11 @@ int main(int argc, char* argv[]) {
     kseq_t* seq = kseq_init(fileno(fastaf));
     int l;
     while ((l = kseq_read(seq)) >= 0) {
+        std::string qname = seq->name.s;
+        virus_names.insert(qname);
+
         index_seq(seq->seq.s, seq->seq.l);
-        rc(seq->seq.s);
+        get_rc(seq->seq.s, seq->seq.l);
         index_seq(seq->seq.s, seq->seq.l);
     }
     kseq_destroy(seq);

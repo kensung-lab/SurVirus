@@ -103,6 +103,10 @@ struct anchor_t {
     }
 };
 
+bool operator < (const anchor_t& a1, const anchor_t& a2) {
+    if (a1.start != a2.start) return a1.start < a2.start;
+    return a1.end < a2.end;
+}
 struct cluster_t {
     static constexpr const char* scan_pattern = "%[^-]-%[^-]-%d";
     static constexpr const char* print_pattern = "%s-%s-%d";

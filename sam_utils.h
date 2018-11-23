@@ -130,13 +130,15 @@ int get_endpoint(bam1_t* r) {
     return bam_is_rev(r) ? r->core.pos : bam_endpos(r);
 }
 
-std::string get_cigar_code(bam1_t* r) {
-    const uint32_t* cigar = bam_get_cigar(r);
+std::string get_cigar_code(const uint32_t* cigar, int n_cigar) {
     std::stringstream ss;
-    for (int i = 0; i < r->core.n_cigar; i++) {
+    for (int i = 0; i < n_cigar; i++) {
         ss << bam_cigar_oplen(cigar[i]) << bam_cigar_opchr(cigar[i]);
     }
     return ss.str();
+}
+std::string get_cigar_code(bam1_t* r) {
+    return get_cigar_code(bam_get_cigar(r), r->core.n_cigar);
 }
 
 bool is_first_in_pair(bam1_t* r, disc_type_t dt) {
@@ -302,7 +304,7 @@ bool is_poly_ACGT(const char* seq, int len) {
     return double(maxc)/len >= 0.8;
 }
 
-void rc(std::string& read) {
+void get_rc(std::string &read) {
     int len = read.length();
     for (int i = 0; i < len/2; i++) {
         std::swap(read[i], read[len-i-1]);
@@ -316,8 +318,7 @@ void rc(std::string& read) {
     }
 }
 
-void rc(char* read) {
-    int len = strlen(read);
+void get_rc(char *read, int len) {
     for (int i = 0; i < len/2; i++) {
         std::swap(read[i], read[len-i-1]);
     }
@@ -337,7 +338,7 @@ std::string get_sequence(bam1_t* r, bool consider_rc = false) {
         seq[i] = get_base(bam_seq, i);
     }
     seq[r->core.l_qseq] = '\0';
-    if (consider_rc && bam_is_rev(r)) rc(seq);
+    if (consider_rc && bam_is_rev(r)) get_rc(seq, r->core.l_qseq);
     return std::string(seq);
 }
 
@@ -346,9 +347,9 @@ std::pair<int, const uint32_t*> cigar_str_to_array(std::string& cigar_str) {
     std::vector<uint32_t> opv;
 
     int pos = 0, prev = 0;
-    std::string bam_ops = "MIDNSHP=XB";
+    std::string bam_ops = BAM_CIGAR_STR;
     while ((pos = cigar_str.find_first_of(bam_ops, prev)) != std::string::npos) {
-        opv.push_back(bam_cigar_gen(std::stoi(cigar_str.substr(prev, pos-prev)), bam_ops.find('M')));
+        opv.push_back(bam_cigar_gen(std::stoi(cigar_str.substr(prev, pos-prev)), bam_ops.find(cigar_str[pos])));
         prev = pos+1;
     }
 

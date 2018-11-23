@@ -189,6 +189,10 @@ for file_index, bam_file in enumerate(bam_files):
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-clips.sorted.bam" % bam_workspace,
                "%s/virus-clips.bam" % bam_workspace)
 
+    readsx = bam_workspace + "/readsx"
+    if not os.path.exists(readsx):
+        os.makedirs(readsx)
+
     remapper_cmd = "./remapper %s %s %s %s > %s/results.txt" \
                    % (cmd_args.host_and_virus_reference, cmd_args.virus_reference, cmd_args.workdir, bam_workspace, bam_workspace)
     print "Executing:", remapper_cmd
