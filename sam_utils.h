@@ -358,7 +358,6 @@ std::pair<int, const uint32_t*> cigar_str_to_array(std::string& cigar_str) {
     return std::make_pair(opv.size(), opa);
 }
 
-
 struct open_samFile_t {
     samFile* file;
     bam_hdr_t* header;

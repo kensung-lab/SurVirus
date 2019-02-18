@@ -602,6 +602,10 @@ int main(int argc, char* argv[]) {
         contig_id2tid[contig_id] = i;
     }
 
+
+
+    /* === READ CHIMERIC PAIRS/READS === */
+
     std::unordered_set<std::string> virus_qnames;
     bam1_t* read = bam_init1();
     while (sam_read1(virus_file->file, virus_file->header, read) >= 0) {
@@ -698,6 +702,11 @@ int main(int argc, char* argv[]) {
         virus_reads_by_name[qname] = read;
     }
 
+    /* ====== */
+
+
+
+    /* === EXTRACT REGIONS === */
 
     std::string reference_regions_path = workspace + "/reference-regions";
     std::vector<region_t*> reference_regions;
@@ -741,6 +750,13 @@ int main(int argc, char* argv[]) {
 
     std::cerr << "REFERENCE REGIONS: " << reference_regions.size() << std::endl;
 
+    /* ====== */
+
+
+
+
+    /* === COMPUTE READS-REGIONS ALIGNMENTS === */
+
     KMER_LEN = 13;
     KMER_BITS = KMER_LEN * 2;
     KMER_MASK = (1ll << KMER_BITS)-1;
@@ -777,7 +793,7 @@ int main(int argc, char* argv[]) {
     } else {
         scores_file_out.open(scores_file_path);
 
-        // Index regions
+        /* == INDEX REGIONS == */
         kmer_index = new std::vector<region_t *>[1 << KMER_BITS];
         kmer_index_rc = new std::vector<region_t *>[1 << KMER_BITS];
         mtx_kmers = new std::mutex[1 << KMER_BITS];
@@ -805,22 +821,12 @@ int main(int argc, char* argv[]) {
                 std::cout << s << std::endl;
             }
         }
+        /* ==== */
 
-        // Associate reads to regions
+        /* == Associate reads to regions == */
         std::cerr << "READS: " << reference_reads.size() << std::endl;
 
-        // index reads by sequence
-        std::unordered_map<std::string, std::vector<bam1_t*> > reads_by_seq;
-        std::vector<std::string> read_seqs;
-        for (bam1_t* r : reference_reads) {
-            std::string seq = get_sequence(r);
-            if (reads_by_seq[seq].empty()) {
-                read_seqs.push_back(seq);
-            }
-            reads_by_seq[seq].push_back(r);
-        }
-
-        // randomize reads to avoid imbalances
+        // randomize reads to avoid imbalances in multi-threading
         auto rng = std::default_random_engine {};
         std::shuffle(std::begin(reference_reads), std::end(reference_reads), rng);
 
@@ -861,7 +867,10 @@ int main(int argc, char* argv[]) {
         }
 
         scores_file_out.close();
+        /* ==== */
     }
+
+    /* ====== */
 
     // sort reads-region associations by score
     for (int i = 0; i < reference_regions.size(); i++) {
