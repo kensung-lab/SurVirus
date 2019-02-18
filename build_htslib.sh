@@ -1,7 +1,7 @@
-unzip htslib-1.7.zip
-cd htslib-1.7
+unzip htslib-1.9.zip
+cd htslib-1.9
 autoheader
 autoconf
-./configure --disable-lmza --prefix=`pwd`
+./configure --prefix=`pwd`
 make
 make install
