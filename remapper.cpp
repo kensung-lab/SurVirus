@@ -11,6 +11,7 @@
 #include <cstring>
 #include <algorithm>
 #include <random>
+#include <sys/time.h>
 
 KSEQ_INIT(int, read)
 
@@ -20,11 +21,13 @@ KSEQ_INIT(int, read)
 #include "libs/ssw.h"
 #include "libs/ssw_cpp.h"
 #include "libs/cptl_stl.h"
-#include "libs/IntervalTree.h"
+
+#include <sparsehash/dense_hash_map>
+#include <sparsehash/dense_hash_set>
 
 typedef unsigned long long ull;
 
-int KMER_LEN = 11;
+int KMER_LEN = 13;
 int KMER_BITS = KMER_LEN * 2;
 ull KMER_MASK = (1ll << KMER_BITS)-1;
 
@@ -33,8 +36,10 @@ stats_t stats;
 
 std::vector<std::string> contig_id2name;
 std::unordered_map<std::string, int> contig_name2id;
-std::unordered_map<int, int> contig_id2tid;
+std::unordered_map<int, int> contig_id2tid, contig_tid2id;
 std::unordered_map<std::string, std::pair<char*, size_t> > chrs;
+
+std::unordered_map<std::string, uint32_t> cigar_ids;
 
 const char fwd_char = 'F', rev_char = 'R';
 
@@ -43,7 +48,7 @@ char bm_nucl[4] = { 'A', 'C', 'G', 'T' };
 char nucl2chr[16];
 
 
-int virus_integration_id = 0;
+std::atomic<int> virus_integration_id(0);
 
 struct virus_integration_t {
     int id;
@@ -70,7 +75,6 @@ struct region_t {
     int contig_id; // id in our own mapping
     int original_bam_id; // id in the bam file
     int start, end;
-    int score = 0;
 
     region_t(int contig_id, int original_bam_id, int start, int end)
             : id(-1), contig_id(contig_id), original_bam_id(original_bam_id), start(start), end(end) {}
@@ -85,33 +89,63 @@ struct region_t {
 };
 
 struct realign_info_t {
-    uint16_t offset;
+    uint16_t offset_start, offset_end;
     uint8_t cigar_len;
     const uint32_t* cigar;
     uint16_t score;
 
-    realign_info_t(uint16_t offset, uint8_t cigar_len, const uint32_t* cigar, uint16_t score) : offset(offset), cigar_len(cigar_len), cigar(cigar), score(score) {}
+    realign_info_t() : offset_start(0), offset_end(0), cigar_len(0), cigar(NULL), score(0) {};
+    realign_info_t(uint16_t offset_start, uint16_t offset_end, uint8_t cigar_len, const uint32_t* cigar, uint16_t score) :
+        offset_start(offset_start), offset_end(offset_end), cigar_len(cigar_len), cigar(cigar), score(score) {}
 };
 struct read_and_score_t {
     bam1_t* read;
     realign_info_t realign_info;
 
-    read_and_score_t(bam1_t* read, uint16_t offset, uint8_t cigar_len, const uint32_t* cigar, uint16_t score)
-    : read(read), realign_info(realign_info_t(offset, cigar_len, cigar, score)) {}
+    read_and_score_t() : read(NULL) {}
+    read_and_score_t(bam1_t* read) : read(read) {};
+    read_and_score_t(bam1_t* read, uint16_t offset_start, uint16_t offset_end, uint8_t cigar_len, const uint32_t* cigar, uint16_t score)
+    : read(read), realign_info(offset_start, offset_end, cigar_len, cigar, score) {}
+
+    bool accepted() { return realign_info.cigar != NULL; }
 };
 
 struct region_score_t {
+    int id;
     region_t* region;
     bool fwd;
     int score, reads;
 
-    region_score_t(region_t* region, bool fwd, int score, int reads) : region(region), fwd(fwd), score(score), reads(reads) {};
+    region_score_t(int id, region_t* region, bool fwd, int score, int reads)
+    : id(id), region(region), fwd(fwd), score(score), reads(reads) {};
+
+    std::string to_str() {
+        return std::to_string(id) + " " + region->to_str() + " READS=" + std::to_string(reads) + " SCORE=" + std::to_string(score);
+    }
+};
+
+struct read_seq_t {
+    bam1_t* read;
+    std::string seq, seq_rc;
+
+    read_seq_t() : read(NULL), seq(""), seq_rc("") {}
+    read_seq_t(bam1_t* read, std::string& seq) : read(read), seq(seq), seq_rc(seq) {
+        get_rc(seq_rc);
+    }
 };
 
 
 char _cigar_int_to_op(uint32_t c) {
     char op = cigar_int_to_op(c);
     return (op != 'X' && op != '=') ? op : 'M';
+};
+
+std::unordered_set<std::string> virus_names;
+bool is_host_region(const region_t *region) {
+    return virus_names.count(contig_id2name[region->contig_id]) == 0;
+};
+bool is_virus_region(const region_t *region) {
+    return virus_names.count(contig_id2name[region->contig_id]);
 };
 
 
@@ -129,19 +163,16 @@ void remove_cluster_from_mm(std::multimap<int, cluster_t*>& mm, cluster_t* c) {
     remove_cluster_from_mm(mm, c, c->a1.end);
 }
 
-void extract_regions(std::vector<bam1_t *>& reads, bam_hdr_t* header, std::vector<region_t*>& regions,
-        bool process_xa = true) {
+void extract_regions(std::vector<bam1_t *>& reads, std::vector<region_t*>& regions, bool process_xa = true) {
+
+    if (reads.empty()) return;
 
     std::vector<cluster_t*> clusters;
-    std::multimap<int, cluster_t*> clusters_map;
     for (bam1_t* read : reads) {
-        std::string tname = header->target_name[read->core.tid];
-        anchor_t a(bam_is_rev(read) ? 'L' : 'R', contig_name2id[tname], read->core.pos, bam_endpos(read), 0);
+        anchor_t a(bam_is_rev(read) ? 'L' : 'R', contig_tid2id[read->core.tid], read->core.pos, bam_endpos(read), 0);
         cluster_t* c = new cluster_t(a, a, DISC_TYPES.DC, 1);
         c->id = clusters.size();
         clusters.push_back(c);
-        clusters_map.insert(std::make_pair(c->a1.start, c));
-        clusters_map.insert(std::make_pair(c->a1.end, c));
 
         uint8_t* xa = bam_aux_get(read, "XA");
         if (xa != NULL && process_xa) {
@@ -169,8 +200,6 @@ void extract_regions(std::vector<bam1_t *>& reads, bam_hdr_t* header, std::vecto
                 cluster_t* c = new cluster_t(a, a, DISC_TYPES.DC, 1);
                 c->id = clusters.size();
                 clusters.push_back(c);
-                clusters_map.insert(std::make_pair(c->a1.start, c));
-                clusters_map.insert(std::make_pair(c->a1.end, c));
             };
         }
     }
@@ -204,14 +233,15 @@ void extract_regions(std::vector<bam1_t *>& reads, bam_hdr_t* header, std::vecto
 //        clusters_map.insert(std::make_pair(c->a1.end, c));
 //    }
 
+
+
     std::vector<int> max_dists;
     for (int i = 0; i < 10; i++) max_dists.push_back(i);
     for (int i = 10; i < 100; i+=10) max_dists.push_back(i);
-//    for (int i = 100; i < config.max_is; i+=100) max_dists.push_back(i);
     max_dists.push_back(stats.max_is);
 
     for (int max_dist : max_dists) {
-        clusters_map.clear();
+        std::multimap<int, cluster_t*> clusters_map;
         for (cluster_t* c : clusters) {
             if (c->dead) continue;
             clusters_map.insert(std::make_pair(c->a1.start, c));
@@ -238,7 +268,7 @@ void extract_regions(std::vector<bam1_t *>& reads, bam_hdr_t* header, std::vecto
             if (ccd.c1->dead || ccd.c2->dead) continue;
 
             cluster_t* new_cluster = cluster_t::merge(ccd.c1, ccd.c2);
-            new_cluster->id = std::max(ccd.c1->id, ccd.c2->id); // clip clusters have id -1
+            new_cluster->id = std::max(ccd.c1->id, ccd.c2->id); // seq clusters have id -1
             clusters.push_back(new_cluster);
 
             ccd.c1->dead = true;
@@ -259,13 +289,14 @@ void extract_regions(std::vector<bam1_t *>& reads, bam_hdr_t* header, std::vecto
         }
     }
 
-
     for (cluster_t* c : clusters) {
-        if (c->dead) continue;
-        regions.push_back(new region_t(c->a1.contig_id, contig_id2tid[c->a1.contig_id],
-                                             std::max(0, c->a1.start-stats.max_is+c->a1.size()),
-                                             std::min(c->a1.end+stats.max_is-c->a1.size(),
-                                             (int) chrs[contig_id2name[c->a1.contig_id]].second)));
+        if (!c->dead) {
+            regions.push_back(new region_t(c->a1.contig_id, contig_id2tid[c->a1.contig_id],
+                                           std::max(0, c->a1.start - stats.max_is + c->a1.size()),
+                                           std::min(c->a1.end + stats.max_is - c->a1.size(),
+                                                    (int) chrs[contig_id2name[c->a1.contig_id]].second)));
+        };
+        delete c;
     }
 }
 
@@ -335,7 +366,7 @@ void index_regions(int id, std::vector<region_t*>* reference_regions, int start,
 }
 
 std::atomic<int> remappings(0);
-std::ofstream scores_file_out;
+FILE* scores_file_out_bin;
 
 std::string alignment_cigar_to_bam_cigar(std::vector<uint32_t> cigar) {
     std::stringstream ss;
@@ -354,30 +385,52 @@ std::string alignment_cigar_to_bam_cigar(std::vector<uint32_t> cigar) {
 }
 
 
-bool accept(StripedSmithWaterman::Alignment& alignment, std::string& query) {
+bool accept_alignment(StripedSmithWaterman::Alignment &alignment, std::string &query) {
     return !is_poly_ACGT(query.c_str()+alignment.query_begin, alignment.query_end-alignment.query_begin+1)
     && alignment.sw_score >= 30; //read->core.l_qseq;
 };
 
-inline void remap_read(std::string seq, bam1_t* read, region_t* region, bool rc, StripedSmithWaterman::Aligner& aligner, StripedSmithWaterman::Filter& filter, int mask_len) {
+
+void write_alignment_to_bytes(char bytes[16], uint32_t region_id, uint32_t read_id, std::string& cigar, uint16_t ref_begin,
+        bool is_rc, uint16_t score) {
+
+    mtx.lock();
+    if (cigar_ids.count(cigar) == 0) cigar_ids[cigar] = cigar_ids.size();
+    uint32_t cigar_id = cigar_ids[cigar];
+    mtx.unlock();
+    cigar_id = (is_rc ? 0x80000000 : 0) | (cigar_id & 0x7FFFFFFF); // forcing is_rc inside the cigar_id to make 16 bytes
+
+    memcpy(bytes, &region_id, 4);
+    memcpy(bytes+4, &read_id, 4);
+    memcpy(bytes+8, &cigar_id, 4);
+    memcpy(bytes+12, &ref_begin, 2);
+    memcpy(bytes+14, &score, 2);
+}
+
+
+inline void remap_read(std::string seq, bam1_t* read, int read_id, region_t* region, bool is_rc, StripedSmithWaterman::Aligner& aligner, StripedSmithWaterman::Filter& filter) {
     StripedSmithWaterman::Alignment alignment;
     aligner.Align(seq.c_str(), chrs[contig_id2name[region->contig_id]].first + region->start,
-                  region->end - region->start, filter, &alignment, mask_len);
+                  region->end - region->start, filter, &alignment, 0);
 
-    if (!accept(alignment, seq)) return;
+    if (!accept_alignment(alignment, seq)) return;
 
-    std::vector<read_and_score_t>& reads_per_region_v = rc ? reads_per_region_rc[region->id] : reads_per_region[region->id];
+    std::vector<read_and_score_t>& reads_per_region_v = is_rc ? reads_per_region_rc[region->id] : reads_per_region[region->id];
 
     std::string cigar = alignment_cigar_to_bam_cigar(alignment.cigar);
     auto cigar_v = cigar_str_to_array(cigar);
 
     mtx_regions[region->id].lock();
-    reads_per_region_v.push_back(read_and_score_t(read, alignment.ref_begin, cigar_v.first, cigar_v.second, alignment.sw_score));
+    reads_per_region_v.push_back(read_and_score_t(read, alignment.ref_begin, alignment.ref_end, cigar_v.first, cigar_v.second, alignment.sw_score));
     mtx_regions[region->id].unlock();
+
+    char line[16]; // each line is 16 bytes
+    write_alignment_to_bytes(line, region->id, read_id, cigar, alignment.ref_begin, is_rc, alignment.sw_score);
+
     mtx.lock();
-    scores_file_out << region->id << " " << bam_get_qname(read) << " " << cigar << " " << alignment.ref_begin << " "
-    << (rc ? rev_char : fwd_char) << " " << alignment.sw_score << std::endl;
+    fwrite(line, 1, 16, scores_file_out_bin);
     mtx.unlock();
+
 
     remappings++;
     if (remappings % 1000000 == 0) {
@@ -385,7 +438,7 @@ inline void remap_read(std::string seq, bam1_t* read, region_t* region, bool rc,
     }
 }
 
-void associate_reads_to_regions(int id, std::vector<bam1_t*>* reference_reads, std::unordered_map<int, IntervalTree<region_t*>* >* region_trees, int start, int end) {
+void associate_reads_to_regions(int id, std::vector<bam1_t*>* reference_reads, int start, int end) {
     mtx.lock();
     std::cerr << "Thread " << id << ": " << "considering reads " << start << " to " << end << " " << std::endl;
     mtx.unlock();
@@ -395,29 +448,18 @@ void associate_reads_to_regions(int id, std::vector<bam1_t*>* reference_reads, s
     int* last_pos = new int[MAX_REGIONS];
     int* last_read_for_region_rc = new int[MAX_REGIONS];
     int* last_pos_rc = new int[MAX_REGIONS];
-    std::fill(last_read_for_region, last_read_for_region+MAX_REGIONS, end);
-    std::fill(last_read_for_region_rc, last_read_for_region_rc+MAX_REGIONS, end);
+    std::fill(last_read_for_region, last_read_for_region+MAX_REGIONS, end+1);
+    std::fill(last_read_for_region_rc, last_read_for_region_rc+MAX_REGIONS, end+1);
 
-    StripedSmithWaterman::Aligner aligner(2, 2, 3, 1, false);
+    StripedSmithWaterman::Aligner aligner(1, 2, 4, 1, false);
     StripedSmithWaterman::Filter filter;
     StripedSmithWaterman::Alignment alignment;
-    for (int r = start; r < end; r++) {
-        bam1_t* read = (*reference_reads)[r];
+    for (int r = start+1; r <= end; r++) {
+        bam1_t* read = (*reference_reads)[r-1];
+
         std::string seq = get_sequence(read, true);
         std::string seq_rc = seq;
         get_rc(seq_rc);
-
-        int mask_len = seq.length() / 2;
-        if (mask_len < 15) mask_len = 15;
-
-        if (read->core.qual >= 50) {
-            std::vector<Interval<region_t*> > regions = (*region_trees)[read->core.tid]->findOverlapping(read->core.pos, bam_endpos(read));
-            for (Interval<region_t*> region_i : regions) {
-                region_t* region = region_i.value;
-                remap_read(seq, read, region, bam_is_rev(read), aligner, filter, mask_len);
-            }
-            continue;
-        }
 
         ull kmer = 0;
         int len = 0;
@@ -435,7 +477,7 @@ void associate_reads_to_regions(int id, std::vector<bam1_t*>* reference_reads, s
                     if (last_read_for_region[region->id] == r && i - last_pos[region->id] >= KMER_LEN) {
                         last_read_for_region[region->id] = -r;
 
-                        remap_read(seq, read, region, false, aligner, filter, mask_len);
+                        remap_read(seq, read, r-1, region, false, aligner, filter);
                     } else if (abs(last_read_for_region[region->id]) != r) {
                         last_read_for_region[region->id] = r;
                         last_pos[region->id] = i;
@@ -446,7 +488,7 @@ void associate_reads_to_regions(int id, std::vector<bam1_t*>* reference_reads, s
                     if (last_read_for_region_rc[region->id] == r && i - last_pos_rc[region->id] >= KMER_LEN) {
                         last_read_for_region_rc[region->id] = -r;
 
-                        remap_read(seq_rc, read, region, true, aligner, filter, mask_len);
+                        remap_read(seq_rc, read, r-1, region, true, aligner, filter);
                     } else if (abs(last_read_for_region_rc[region->id]) != r) {
                         last_read_for_region_rc[region->id] = r;
                         last_pos_rc[region->id] = i;
@@ -463,29 +505,15 @@ void associate_reads_to_regions(int id, std::vector<bam1_t*>* reference_reads, s
 }
 
 
-std::string print(ull kmer, int len) {
-    char s[KMER_LEN];
-    s[len] = '\0';
-    while (len > 0) {
-        len--;
-        s[len] = bm_nucl[kmer%4];
-        kmer /= 4;
-    }
-    return s;
-}
-
-
 std::pair<int, int> compute_region_score(region_t* region, bool rc, std::unordered_set<bam1_t*>& already_used) {
-    bool print = (region->to_str() == "chr5:1297112-1298020");
     int score = 0, reads = 0;
     std::vector<read_and_score_t>& read_scores = rc ? reads_per_region_rc[region->id] : reads_per_region[region->id];
-    for (read_and_score_t read_and_score : read_scores) {
+    for (read_and_score_t& read_and_score : read_scores) {
         if (already_used.count(read_and_score.read) == 0) {
             score += read_and_score.realign_info.score;
             reads++;
         }
     }
-    if (print) std::cerr << rc << " " << score << " " << reads << std::endl;
     return std::make_pair(score, reads);
 };
 
@@ -497,57 +525,298 @@ void del_aux(bam1_t* read, const char* tag) {
 
 #define bam1_seq_seti(s, i, c) ( (s)[(i)>>1] = ((s)[(i)>>1] & 0xf<<(((i)&1)<<2)) | (c)<<((~(i)&1)<<2) )
 
-void edit_remapped_reads(region_t* region, bool rc, std::unordered_set<bam1_t*>& already_used) {
-    std::vector<read_and_score_t>& read_scores = rc ? reads_per_region_rc[region->id] : reads_per_region[region->id];
+void edit_remapped_reads(region_t* region, std::vector<read_and_score_t>& read_scores, bool rc) {
     for (read_and_score_t read_and_score : read_scores) {
-        if (already_used.count(read_and_score.read) == 0) {
-            bam1_t* read = read_and_score.read;
+        bam1_t* read = read_and_score.read;
 
-            read->core.tid = region->original_bam_id;
-            read->core.pos = region->start + read_and_score.realign_info.offset;
-            if ((rc && !bam_is_rev(read)) || (!rc && bam_is_rev(read))) {
-                std::string seq = get_sequence(read);
-                get_rc(seq);
-                uint8_t* s = bam_get_seq(read);
-                for (int i = 0; i < read->core.l_qseq; ++i){
-                    bam1_seq_seti(s, i, seq_nt16_table[seq[i]]);
-                }
+        read->core.tid = region->original_bam_id;
+        read->core.pos = region->start + read_and_score.realign_info.offset_start;
+        if ((rc && !bam_is_rev(read)) || (!rc && bam_is_rev(read))) {
+            std::string seq = get_sequence(read);
+            get_rc(seq);
+            uint8_t* s = bam_get_seq(read);
+            for (int i = 0; i < read->core.l_qseq; ++i){
+                bam1_seq_seti(s, i, seq_nt16_table[seq[i]]);
             }
-            if (rc) read->core.flag |= BAM_FREVERSE;
-            else read->core.flag &= ~BAM_FREVERSE;
+        }
+        if (rc) read->core.flag |= BAM_FREVERSE;
+        else read->core.flag &= ~BAM_FREVERSE;
 
-            del_aux(read, "AS");
-            del_aux(read, "XS");
-            del_aux(read, "XA");
-            del_aux(read, "SA");
-            del_aux(read, "NM");
-            del_aux(read, "MD");
+        del_aux(read, "AS");
+        del_aux(read, "XS");
+        del_aux(read, "XA");
+        del_aux(read, "SA");
+        del_aux(read, "NM");
+        del_aux(read, "MD");
 
-            int l_aux = bam_get_l_aux(read);
-            int l_data = read->core.l_qname + 4*read_and_score.realign_info.cigar_len + (read->core.l_qseq+1)/2
-                    + read->core.l_qseq + l_aux;
-            uint32_t m_data = l_data;
-            kroundup32(m_data);
-            uint8_t* data = new uint8_t[m_data];
-            memset(data, 0, m_data);
+        int l_aux = bam_get_l_aux(read);
+        int l_data = read->core.l_qname + 4*read_and_score.realign_info.cigar_len + (read->core.l_qseq+1)/2
+                + read->core.l_qseq + l_aux;
+        uint32_t m_data = l_data;
+        kroundup32(m_data);
+        uint8_t* data = new uint8_t[m_data];
+        memset(data, 0, m_data);
 
-            uint8_t* mov_data = data;
-            memcpy(mov_data, (uint8_t*) bam_get_qname(read), read->core.l_qname);
-            mov_data += read->core.l_qname;
-            memcpy(mov_data, read_and_score.realign_info.cigar, 4*read_and_score.realign_info.cigar_len);
-            mov_data += 4*read_and_score.realign_info.cigar_len;
-            memcpy(mov_data, (uint8_t*) bam_get_seq(read), (read->core.l_qseq+1)/2);
-            mov_data += (read->core.l_qseq+1)/2;
-            memcpy(mov_data, (uint8_t*) bam_get_qual(read), read->core.l_qseq);
-            mov_data += read->core.l_qseq;
-            memcpy(mov_data, (uint8_t*) bam_get_aux(read), l_aux);
+        uint8_t* mov_data = data;
+        memcpy(mov_data, (uint8_t*) bam_get_qname(read), read->core.l_qname);
+        mov_data += read->core.l_qname;
+        memcpy(mov_data, read_and_score.realign_info.cigar, 4*read_and_score.realign_info.cigar_len);
+        mov_data += 4*read_and_score.realign_info.cigar_len;
+        memcpy(mov_data, (uint8_t*) bam_get_seq(read), (read->core.l_qseq+1)/2);
+        mov_data += (read->core.l_qseq+1)/2;
+        memcpy(mov_data, (uint8_t*) bam_get_qual(read), read->core.l_qseq);
+        mov_data += read->core.l_qseq;
+        memcpy(mov_data, (uint8_t*) bam_get_aux(read), l_aux);
 
-            read->l_data = l_data;
-            read->m_data = m_data;
-            read->data = data;
-            read->core.n_cigar = read_and_score.realign_info.cigar_len;
+        read->l_data = l_data;
+        read->m_data = m_data;
+        read->data = data;
+        read->core.n_cigar = read_and_score.realign_info.cigar_len;
+    }
+}
+
+
+void write_qnames_indices(std::string& workspace, std::vector<bam1_t *>& reads) {
+    std::ofstream qnames_map_out(workspace + "/qnames-map");
+    for (int i = 0; i < reads.size(); i++) {
+        qnames_map_out << i << " " << bam_get_qname(reads[i]) << " " << get_cigar_code(reads[i]) << std::endl;
+    }
+    qnames_map_out.close();
+}
+void load_qnames_indices(std::string& workspace, std::vector<bam1_t*> reads, std::vector<bam1_t*>& id_to_read) {
+    std::ifstream qnames_map_in(workspace + "/qnames-map");
+
+    std::unordered_map<std::string, std::vector<int> > qname_to_id;
+    int i; std::string qname, cigar;
+    while (qnames_map_in >> i >> qname >> cigar) {
+        qname_to_id[qname + " " + cigar].push_back(i);
+    }
+    qnames_map_in.close();
+
+    id_to_read.resize(i+1);
+
+    for (bam1_t* r : reads) {
+        std::string qname = bam_get_qname(r), cigar = get_cigar_code(r);
+        for (int i : qname_to_id[qname + " " + cigar]) {
+            id_to_read[i] = r;
         }
     }
+}
+void load_cigars_indices(std::string& workspace, std::vector<std::pair<int, const uint32_t*> >& id_to_cigar) {
+    std::ifstream cigars_map_in(workspace + "/cigars-map");
+    int i; std::string cigar_str;
+
+    std::vector<std::pair<int, std::string> > temp;
+    while (cigars_map_in >> i >> cigar_str) {
+        temp.push_back(std::make_pair(i, cigar_str));
+    }
+
+    id_to_cigar.resize(temp.size()+1);
+    for (std::pair<int, std::string>& p : temp) {
+        id_to_cigar[p.first] = cigar_str_to_array(p.second);
+    }
+}
+void load_qnames_indices(std::string& workspace, std::vector<bam1_t*> reads, std::unordered_map<uint32_t , bam1_t*>& id_to_read) {
+    std::ifstream qnames_map_in(workspace + "/qnames-map");
+
+    std::unordered_map<std::string, std::vector<int> > qname_to_id;
+    int i; std::string qname, cigar;
+    while (qnames_map_in >> i >> qname >> cigar) {
+        qname_to_id[qname + " " + cigar].push_back(i);
+    }
+    qnames_map_in.close();
+
+    for (bam1_t* r : reads) {
+        std::string qname = bam_get_qname(r), cigar = get_cigar_code(r);
+        for (int i : qname_to_id[qname + " " + cigar]) {
+            id_to_read[i] = r;
+        }
+    }
+}
+void load_cigars_indices(std::string& workspace, std::unordered_map<uint32_t, std::pair<int, const uint32_t*> >& id_to_cigar) {
+    std::ifstream cigars_map_in(workspace + "/cigars-map");
+    int i; std::string cigar_str;
+    while (cigars_map_in >> i >> cigar_str) {
+        id_to_cigar[i] = cigar_str_to_array(cigar_str);
+    }
+}
+
+
+const int APPROX_FACTOR = 500;
+std::unordered_set<std::string> existing_caches;
+std::unordered_map<std::string, google::dense_hash_map<uint64_t, read_and_score_t> > cached_virus_alignments;
+
+uint64_t virus_read_id = 1;
+std::vector<read_seq_t> virus_reads_seqs;
+
+int remap_virus_reads_supp(region_t* region, std::vector<uint64_t>& read_seq_ids, bool rc,
+        std::vector<read_and_score_t>* virus_read_scores,
+        StripedSmithWaterman::Aligner& aligner, StripedSmithWaterman::Filter& filter) {
+
+    std::string region_str = (rc ? "-" : "+") + region->to_str();
+
+    // FIXME: reads appearing as both read and anchor should have two different cachings, one as reads and one as anchor
+    google::dense_hash_map<uint64_t, read_and_score_t>& cached_region_alignments = cached_virus_alignments[region_str];
+    if (!existing_caches.count(region_str)) {
+        cached_region_alignments.set_empty_key(0);
+        existing_caches.insert(region_str);
+    }
+
+    std::vector<read_and_score_t> virus_read_scores_local;
+    for (uint64_t read_seq_id : read_seq_ids) {
+        if (!cached_region_alignments.count(read_seq_id)) {
+            StripedSmithWaterman::Alignment alignment;
+            read_seq_t &read_seq = virus_reads_seqs[read_seq_id];
+            std::string &read_seq_str = rc ? read_seq.seq_rc : read_seq.seq;
+            aligner.Align(read_seq_str.c_str(), chrs[contig_id2name[region->contig_id]].first + region->start,
+                          region->len(), filter, &alignment, 0);
+
+            if (accept_alignment(alignment, read_seq_str)) {
+                std::string cigar_str = alignment_cigar_to_bam_cigar(alignment.cigar);
+                std::pair<int, const uint32_t *> cigar = cigar_str_to_array(cigar_str);
+                cached_region_alignments[read_seq_id] = read_and_score_t(read_seq.read, alignment.ref_begin, alignment.ref_end,
+                                                                         cigar.first, cigar.second, alignment.sw_score);
+            } else {
+                // cache failure to align
+                cached_region_alignments[read_seq_id] = read_and_score_t(read_seq.read);
+            }
+        }
+
+        read_and_score_t& ras = cached_region_alignments[read_seq_id];
+        if (!ras.accepted()) continue;
+
+        virus_read_scores_local.push_back(ras);
+    }
+
+    // find clip position
+    int clip_positions[1000000];
+    std::fill(clip_positions, clip_positions+region->len(), 0);
+    for (read_and_score_t& ras : virus_read_scores_local) {
+        if (rc && cigar_int_to_op(ras.realign_info.cigar[0]) == 'S') {
+            clip_positions[ras.realign_info.offset_start]++;
+        }
+        if (!rc &&  cigar_int_to_op(ras.realign_info.cigar[ras.realign_info.cigar_len-1]) == 'S') {
+            clip_positions[ras.realign_info.offset_end]++;
+        }
+    }
+    int clip_pos = std::distance(clip_positions, std::max_element(clip_positions, clip_positions+region->len()));
+
+    int score = 0;
+    for (read_and_score_t& ras : virus_read_scores_local) {
+        if ((rc && ras.realign_info.offset_start >= clip_pos) || (!rc && ras.realign_info.offset_end <= clip_pos)) {
+            score += ras.realign_info.score;
+            if (virus_read_scores != NULL) {
+                virus_read_scores->push_back(ras);
+            }
+        }
+    }
+    return score;
+}
+
+std::pair<region_t*, bool> remap_virus_reads(region_score_t& host_region_score, std::vector<read_and_score_t>& virus_read_scores,
+        google::dense_hash_map<std::string, bam1_t*>& virus_reads_by_name, std::unordered_set<bam1_t*>& already_used) {
+    StripedSmithWaterman::Aligner aligner(1, 2, 4, 1, false);
+    StripedSmithWaterman::Filter filter;
+
+    std::vector<read_and_score_t>& host_read_scores = host_region_score.fwd ?
+            reads_per_region[host_region_score.region->id] : reads_per_region_rc[host_region_score.region->id];
+    // remove already used read_and_score
+    host_read_scores.erase(
+            std::remove_if(host_read_scores.begin(), host_read_scores.end(), [&already_used](read_and_score_t& ras) {
+                return already_used.count(ras.read);
+            }),
+            host_read_scores.end());
+    host_region_score.reads = host_read_scores.size();
+
+    // retrieve virus mates
+    std::vector<bam1_t*> remapped_reads_mates;
+    std::vector<bam1_t*> remapped_host_anchors;
+    for (read_and_score_t& read_score : host_read_scores) {
+        std::string qname = bam_get_qname(read_score.read);
+        if (virus_reads_by_name.count(qname)) { // TODO: it would be useful to use successful host clips for region finding
+            remapped_reads_mates.push_back(virus_reads_by_name[qname]);
+        }
+
+        if ((host_region_score.fwd && is_right_clipped(read_score.read))
+        || (!host_region_score.fwd && is_left_clipped(read_score.read))) {
+            remapped_host_anchors.push_back(read_score.read);
+        }
+    }
+
+    // extract virus regions
+    std::vector<region_t*> virus_regions;
+    extract_regions(remapped_reads_mates, virus_regions);
+    virus_regions.erase(
+            std::remove_if(virus_regions.begin(), virus_regions.end(), is_host_region), virus_regions.end()
+    );
+    for (region_t* region : virus_regions) {
+        region->start = (region->start/APPROX_FACTOR) * APPROX_FACTOR;
+        region->end = (region->end/APPROX_FACTOR) * APPROX_FACTOR + APPROX_FACTOR;
+        region->end = std::min(region->end, (int) chrs[contig_id2name[region->contig_id]].second);
+    }
+
+    if (virus_regions.empty()) return std::make_pair(nullptr, false);
+
+    std::vector<uint64_t> read_seq_ids;
+    read_seq_ids.reserve(remapped_reads_mates.size()+remapped_host_anchors.size());
+    for (bam1_t* read : remapped_reads_mates) {
+        if (!read->id) {
+            read->id = virus_read_id++;
+            std::string seq = get_sequence(read, true);
+            virus_reads_seqs.push_back(read_seq_t(read, seq));
+        }
+        read_seq_ids.push_back(read->id);
+    }
+    for (bam1_t* anchor : remapped_host_anchors) {
+        if (!anchor->id) {
+            anchor->id = virus_read_id++;
+            std::string clip;
+            if (is_right_clipped(anchor)) {
+                clip = get_sequence(anchor).substr(anchor->core.l_qseq-get_right_clip_len(anchor), get_right_clip_len(anchor));
+                get_rc(clip);
+            } else {
+                clip = get_sequence(anchor).substr(0, get_left_clip_len(anchor));
+            }
+            virus_reads_seqs.push_back(read_seq_t(anchor, clip));
+        }
+        read_seq_ids.push_back(anchor->id);
+    }
+
+    region_t* best_region = NULL;
+    int best_score = -1;
+    bool is_best_fwd;
+    for (region_t* region : virus_regions) {
+        int score = remap_virus_reads_supp(region, read_seq_ids, false, NULL, aligner, filter);
+        int rc_score = remap_virus_reads_supp(region, read_seq_ids, true, NULL, aligner, filter);
+
+        int max_score = std::max(score, rc_score);
+        if (best_score < max_score) {
+            best_score = max_score;
+            best_region = region;
+            is_best_fwd = (max_score == score);
+        }
+    }
+
+    // FIXME: what if best_region is null?
+    std::cerr << "BEST VIRUS REGION: " << best_region->to_str() << " " << best_score << std::endl;
+    remap_virus_reads_supp(best_region, read_seq_ids, !is_best_fwd, &virus_read_scores, aligner, filter);
+
+    google::dense_hash_set<std::string> remapped_virus_qnames;
+    remapped_virus_qnames.set_empty_key("");
+    for (read_and_score_t& read_and_score : virus_read_scores) {
+        remapped_virus_qnames.insert(bam_get_qname(read_and_score.read));
+    }
+
+    std::cerr << "BEFORE " << host_region_score.to_str() << std::endl;
+    host_region_score.score = 0;
+    for (read_and_score_t& ras : host_read_scores) {
+        if (remapped_virus_qnames.count(bam_get_qname(ras.read))) {
+            host_region_score.score += ras.realign_info.score;
+        }
+    }
+    std::cerr << "AFTER " << host_region_score.to_str() << std::endl << std::endl;
+
+    return std::make_pair(best_region, is_best_fwd);
 }
 
 
@@ -561,7 +830,7 @@ int main(int argc, char* argv[]) {
 
     nucl2chr[1] = 'A'; nucl2chr[2] = 'C'; nucl2chr[4] = 'G'; nucl2chr[8] = 'T'; nucl2chr[15] = 'N';
 
-    std::string reference_fname  = argv[1];
+    std::string host_reference_fname  = argv[1];
     std::string virus_reference_fname  = argv[2];
     std::string workdir = argv[3];
     std::string workspace = argv[4];
@@ -574,37 +843,43 @@ int main(int argc, char* argv[]) {
         contig_name2id[contig_name] = contig_id;
     }
 
-    FILE* fastaf = fopen(reference_fname.c_str(), "r");
-    kseq_t *seq = kseq_init(fileno(fastaf));
+    FILE* fasta = fopen(host_reference_fname.c_str(), "r");
+    kseq_t *seq = kseq_init(fileno(fasta));
     int l;
     while ((l = kseq_read(seq)) >= 0) {
         chrs[std::string(seq->name.s)] = std::make_pair(new char[seq->seq.l+1], seq->seq.l);
         strcpy(chrs[std::string(seq->name.s)].first, seq->seq.s);
     }
     kseq_destroy(seq);
+    fclose(fasta);
 
     // read virus list
-    std::unordered_set<std::string> virus_names;
-    FILE* virus_ref_fasta = fopen(virus_reference_fname.c_str(), "r");
-    seq = kseq_init(fileno(virus_ref_fasta));
+    fasta = fopen(virus_reference_fname.c_str(), "r");
+    seq = kseq_init(fileno(fasta));
     while ((l = kseq_read(seq)) >= 0) {
         virus_names.insert(seq->name.s);
+        chrs[std::string(seq->name.s)] = std::make_pair(new char[seq->seq.l+1], seq->seq.l);
+        strcpy(chrs[std::string(seq->name.s)].first, seq->seq.s);
     }
     kseq_destroy(seq);
+    fclose(fasta);
 
     config = parse_config(workdir + "/config.txt");
     stats = parse_stats(workspace + "/stats.txt");
 
     open_samFile_t* virus_file = open_samFile((workspace + "/virus-side.sorted.bam").data(), true);
-    open_samFile_t* reference_file = open_samFile((workspace + "/reference-side.sorted.bam").data(), true);
-    for (int i = 0; i < reference_file->header->n_targets; i++) {
-        int contig_id = contig_name2id[reference_file->header->target_name[i]];
+    open_samFile_t* host_file = open_samFile((workspace + "/host-side.sorted.bam").data(), true);
+    open_samFile_t* host_and_virus_file = open_samFile((workspace + "/retained-pairs-remapped.sorted.bam").data()); // just for the header
+    for (int i = 0; i < host_file->header->n_targets; i++) {
+        int contig_id = contig_name2id[host_file->header->target_name[i]];
         contig_id2tid[contig_id] = i;
+        contig_tid2id[i] = contig_id;
     }
 
 
-
     /* === READ CHIMERIC PAIRS/READS === */
+
+    /* == Pouring host-reads into host_reads == */
 
     std::unordered_set<std::string> virus_qnames;
     bam1_t* read = bam_init1();
@@ -614,24 +889,23 @@ int main(int argc, char* argv[]) {
     }
     close_samFile(virus_file);
 
-
     // in order to dedup reads inserted twice (perhaps once because of discordant pair and once because of clips)
-    std::unordered_set<std::string> ref_hashes, virus_hashes;
+    std::unordered_set<std::string> host_hashes;
     auto read_hash = [](bam1_t* read) {
-        return std::string(bam_get_qname(read)) + "-" + get_sequence(read);
+        return std::string(bam_get_qname(read)) + "_" + (is_first_in_pair(read) ? "1" : "2");
     };
 
     // extracting paired reference-virus reads
-    std::vector<bam1_t*> reference_reads;
-    std::unordered_set<std::string> reference_qnames;
-    while (sam_read1(reference_file->file, reference_file->header, read) >= 0) {
+    std::vector<bam1_t*> host_reads;
+    std::unordered_set<std::string> host_qnames;
+    while (sam_read1(host_file->file, host_file->header, read) >= 0) {
         std::string qname = bam_get_qname(read);
-        if (virus_qnames.count(qname) > 0) {
+        if (virus_qnames.count(qname)) {
             std::string h = read_hash(read);
-            if (ref_hashes.count(h) == 0) {
-                reference_reads.push_back(bam_dup1(read));
-                ref_hashes.insert(h);
-                reference_qnames.insert(qname);
+            if (!host_hashes.count(h)) {
+                host_reads.push_back(bam_dup1(read));
+                host_hashes.insert(h);
+                host_qnames.insert(qname);
             }
         }
     }
@@ -640,67 +914,49 @@ int main(int argc, char* argv[]) {
     std::vector<bam1_t*> virus_reads;
     while (sam_read1(virus_file->file, virus_file->header, read) >= 0) {
         std::string qname = bam_get_qname(read);
-        if (reference_qnames.count(qname) > 0) {
+        if (host_qnames.count(qname)) {
             virus_reads.push_back(bam_dup1(read));
         }
     }
-//    close_samFile(virus_file);
+    close_samFile(virus_file);
 
+    /* == */
 
-    // extracting good clips, clips that map to virus (resp. reference) if anchor was on reference (resp. virus)
-    std::unordered_set<std::string> good_clips;
+    /* == Pour host anchors having their seq remapped to virus into host_reads == */
 
-    open_samFile_t* virus_clips_file = open_samFile((workspace + "/virus-clips.sorted.bam").data(), true);
-    while (sam_read1(virus_clips_file->file, virus_clips_file->header, read) >= 0) {
+    std::unordered_set<std::string> successful_host_clips; // host clips that map to host
+    open_samFile_t* host_clips_file = open_samFile((workspace + "/host-clips.sorted.bam").data(), true);
+    while (sam_read1(host_clips_file->file, host_clips_file->header, read) >= 0) {
+        if (virus_names.count(host_clips_file->header->target_name[read->core.tid]) ) { // seq was mapped to virus
+            std::string qname = bam_get_qname(read);
+            successful_host_clips.insert(qname);
+        }
+    }
+    close_samFile(host_clips_file);
+
+    open_samFile_t* host_anchors_file = open_samFile((workspace + "/host-anchors.sorted.bam").data(), true);
+    while (sam_read1(host_anchors_file->file, host_anchors_file->header, read) >= 0) {
         std::string qname = bam_get_qname(read);
-        if (virus_names.count(virus_clips_file->header->target_name[read->core.tid]) == 0) { // clip was mapped to reference
-            good_clips.insert(qname);
+        if (successful_host_clips.count(qname)) {
             std::string h = read_hash(read);
-            if (ref_hashes.count(h) == 0) {
-                reference_reads.push_back(bam_dup1(read));
-                ref_hashes.insert(h);
+            if (!host_hashes.count(h)) {
+                host_reads.push_back(bam_dup1(read));
+                host_hashes.insert(h);
             }
         }
     }
-    open_samFile_t* reference_clips_file = open_samFile((workspace + "/reference-clips.sorted.bam").data(), true);
-    while (sam_read1(reference_clips_file->file, reference_clips_file->header, read) >= 0) {
-        std::string qname = bam_get_qname(read);
-        if (virus_names.count(reference_clips_file->header->target_name[read->core.tid]) > 0) { // clip was mapped to virus
-            good_clips.insert(qname);
-            virus_reads.push_back(bam_dup1(read));
-        }
-    }
-    close_samFile(virus_clips_file);
-    close_samFile(reference_clips_file);
+    close_samFile(host_anchors_file);
 
+    /* == */
 
-    // extracting the good anchors, anchors of good clips
-    open_samFile_t* virus_anchors_file = open_samFile((workspace + "/virus-anchors.sorted.bam").data(), true);
-    while (sam_read1(virus_anchors_file->file, virus_anchors_file->header, read) >= 0) {
-        std::string qname = bam_get_qname(read);
-        if (good_clips.count(qname)) {
-            virus_reads.push_back(bam_dup1(read));
-        }
-    }
-    open_samFile_t* reference_anchors_file = open_samFile((workspace + "/reference-anchors.sorted.bam").data(), true);
-    while (sam_read1(reference_anchors_file->file, reference_anchors_file->header, read) >= 0) {
-        std::string qname = bam_get_qname(read);
-        if (good_clips.count(qname)) {
-            std::string h = read_hash(read);
-            if (ref_hashes.count(h) == 0) {
-                reference_reads.push_back(bam_dup1(read));
-                ref_hashes.insert(h);
-            }
-        }
-    }
-    close_samFile(virus_anchors_file);
-    close_samFile(reference_anchors_file);
-
-    std::unordered_map<std::string, bam1_t*> virus_reads_by_name;
+    google::dense_hash_map<std::string, bam1_t*> virus_reads_by_name;
+    virus_reads_by_name.set_empty_key("");
     for (bam1_t* read : virus_reads) {
         std::string qname = bam_get_qname(read);
         virus_reads_by_name[qname] = read;
     }
+
+    std::cerr << "HOST READS: " << host_reads.size() << std::endl;
 
     /* ====== */
 
@@ -708,47 +964,45 @@ int main(int argc, char* argv[]) {
 
     /* === EXTRACT REGIONS === */
 
-    std::string reference_regions_path = workspace + "/reference-regions";
-    std::vector<region_t*> reference_regions;
-    std::ifstream reference_regions_fin(reference_regions_path);
+    std::string host_regions_path = workspace + "/host-regions";
+    std::vector<region_t*> host_regions;
+    std::ifstream host_regions_fin(host_regions_path);
 
-    if (reference_regions_fin.good()) {
+    if (host_regions_fin.good()) {
         int region_id, start, end;
         std::string contig_name;
-        while (reference_regions_fin >> region_id >> contig_name >> start >> end) {
+        while (host_regions_fin >> region_id >> contig_name >> start >> end) {
             int contig_id = contig_name2id[contig_name];
             region_t* region = new region_t(contig_id, contig_id2tid[contig_id], start, end);
             region->id = region_id;
-            reference_regions.push_back(region);
+            host_regions.push_back(region);
         }
     } else {
-        extract_regions(reference_reads, reference_file->header, reference_regions);
+        extract_regions(host_reads, host_regions);
 
         // filter virus regions
-        auto is_virus_region = [&virus_names](const region_t *region) {
-            return virus_names.count(contig_id2name[region->contig_id]);
-        };
-        reference_regions.erase(
-                std::remove_if(reference_regions.begin(), reference_regions.end(), is_virus_region),
-                reference_regions.end());
+        host_regions.erase(
+                std::remove_if(host_regions.begin(), host_regions.end(), is_virus_region),
+                host_regions.end());
 
-        std::sort(reference_regions.begin(), reference_regions.end(), [](const region_t *reg1, const region_t *reg2) {
+        std::sort(host_regions.begin(), host_regions.end(), [](const region_t *reg1, const region_t *reg2) {
             if (reg1->contig_id == reg2->contig_id) return reg1->start < reg2->start;
             return reg1->contig_id < reg2->contig_id;
         });
-        for (int i = 0; i < reference_regions.size(); i++) {
-            reference_regions[i]->id = i;
+        for (int i = 0; i < host_regions.size(); i++) {
+            host_regions[i]->id = i;
         }
 
-        std::ofstream reference_regions_file(reference_regions_path);
-        for (region_t* region : reference_regions) {
-            reference_regions_file << region->id << " " << contig_id2name[region->contig_id] << " " << region->start << " " << region->end << std::endl;
+        std::ofstream host_regions_file(host_regions_path);
+        for (region_t* region : host_regions) {
+            host_regions_file << region->id << " " << contig_id2name[region->contig_id] << " " <<
+            region->start << " " << region->end << std::endl;
         }
-        reference_regions_file.close();
+        host_regions_file.close();
     }
-    reference_regions_fin.close();
+    host_regions_fin.close();
 
-    std::cerr << "REFERENCE REGIONS: " << reference_regions.size() << std::endl;
+    std::cerr << "HOST REGIONS: " << host_regions.size() << std::endl;
 
     /* ====== */
 
@@ -757,41 +1011,43 @@ int main(int argc, char* argv[]) {
 
     /* === COMPUTE READS-REGIONS ALIGNMENTS === */
 
-    KMER_LEN = 13;
-    KMER_BITS = KMER_LEN * 2;
-    KMER_MASK = (1ll << KMER_BITS)-1;
+    reads_per_region = new std::vector<read_and_score_t>[host_regions.size()];
+    reads_per_region_rc = new std::vector<read_and_score_t>[host_regions.size()];
 
-    reads_per_region = new std::vector<read_and_score_t>[reference_regions.size()];
-    reads_per_region_rc = new std::vector<read_and_score_t>[reference_regions.size()];
+    std::string scores_file_path = workspace + "/reads.scores.bin";
+    FILE* scores_file_in_bin = fopen(scores_file_path.c_str(), "rb");
+    if (scores_file_in_bin) {
+        std::cerr << "Reading qnames." << std::endl;
+        std::vector<bam1_t*> id_to_read;
+//        std::unordered_map<uint32_t, bam1_t*> id_to_read;
+        load_qnames_indices(workspace, host_reads, id_to_read);
 
-    std::string scores_file_path = workspace + "/reads.scores";
-    std::ifstream scores_file_in(scores_file_path);
-    if (scores_file_in.good()) {
-        std::unordered_map<std::string, bam1_t*> reads_map;
-        for (bam1_t* read : reference_reads) {
-            std::string qname = bam_get_qname(read);
-            reads_map[qname + " " + std::to_string(read->core.l_qseq)] = read;
-        }
+        std::cerr << "Reading cigars." << std::endl;
+//        std::vector<std::pair<int, const uint32_t*> > id_to_cigar; TODO: if use vector version (faster) google perftools crashes
+        std::unordered_map<uint32_t, std::pair<int, const uint32_t*> > id_to_cigar;
+        load_cigars_indices(workspace, id_to_cigar);
 
-        int region_id;
-        uint16_t score;
-        std::string bam_name, cigar;
-        uint16_t offset;
-        char strand;
         std::cerr << "Reading mappings." << std::endl;
-        while (scores_file_in >> region_id >> bam_name >> cigar >> offset >> strand >> score) {
-            std::pair<int, const uint32_t*> cigar_v = cigar_str_to_array(cigar);
-            int qlen = bam_cigar2qlen(cigar_v.first, cigar_v.second);
-            bam1_t* read = reads_map[bam_name + " " + std::to_string(qlen)];
-            if (strand == fwd_char) {
-                reads_per_region[region_id].push_back(read_and_score_t(read, offset, cigar_v.first, cigar_v.second, score));
+        char line[16];
+        while (fread(line, 16, 1, scores_file_in_bin)) {
+            uint32_t region_id = *((uint32_t *) (line + 0));
+            uint32_t read_id = *((uint32_t *) (line + 4));
+            bam1_t* read = id_to_read[read_id];
+            uint32_t cigar_id = *((uint32_t *) (line + 8));
+            bool is_rc = cigar_id & 0x80000000;
+            std::pair<int, const uint32_t *>& cigar_v = id_to_cigar[cigar_id & 0x7FFFFFFF];
+            uint16_t offset = *((uint16_t *) (line + 12));
+            uint16_t score = *((uint16_t *) (line + 14));
+            if (!is_rc) {
+                reads_per_region[region_id].emplace_back(read, offset, offset, cigar_v.first, cigar_v.second, score);
             } else {
-                reads_per_region_rc[region_id].push_back(read_and_score_t(read, offset, cigar_v.first, cigar_v.second, score));
+                reads_per_region_rc[region_id].emplace_back(read, offset, offset, cigar_v.first, cigar_v.second, score);
             }
         }
+        fclose(scores_file_in_bin);
         std::cerr << "Mappings read." << std::endl;
     } else {
-        scores_file_out.open(scores_file_path);
+        scores_file_out_bin = fopen(scores_file_path.c_str(), "wb");
 
         /* == INDEX REGIONS == */
         kmer_index = new std::vector<region_t *>[1 << KMER_BITS];
@@ -801,16 +1057,16 @@ int main(int argc, char* argv[]) {
         ctpl::thread_pool thread_pool1(config.threads);
         std::vector<std::future<void> > futures;
 
-        int regions_per_thread = reference_regions.size() / config.threads;
+        int regions_per_thread = host_regions.size() / config.threads;
 
         for (int i = 0; i < config.threads - 1; i++) {
-            std::future<void> future = thread_pool1.push(index_regions, &reference_regions, i * regions_per_thread,
+            std::future<void> future = thread_pool1.push(index_regions, &host_regions, i * regions_per_thread,
                                                          (i + 1) * regions_per_thread);
             futures.push_back(std::move(future));
         }
-        std::future<void> future = thread_pool1.push(index_regions, &reference_regions,
+        std::future<void> future = thread_pool1.push(index_regions, &host_regions,
                                                      (config.threads - 1) * regions_per_thread,
-                                                     reference_regions.size());
+                                                     host_regions.size());
         futures.push_back(std::move(future));
 
         thread_pool1.stop(true);
@@ -824,37 +1080,29 @@ int main(int argc, char* argv[]) {
         /* ==== */
 
         /* == Associate reads to regions == */
-        std::cerr << "READS: " << reference_reads.size() << std::endl;
+        std::cerr << "READS: " << host_reads.size() << std::endl;
 
         // randomize reads to avoid imbalances in multi-threading
         auto rng = std::default_random_engine {};
-        std::shuffle(std::begin(reference_reads), std::end(reference_reads), rng);
+        std::shuffle(std::begin(host_reads), std::end(host_reads), rng);
 
-        // creating an interval tree of regions
-        std::unordered_map<int, IntervalTree<region_t*>* > region_trees;
-        std::unordered_map<int, std::vector<Interval<region_t*> > > intervals;
-        for (region_t* region : reference_regions) {
-            intervals[region->original_bam_id].push_back(Interval<region_t*>(region->start, region->end, region));
-        }
-        for (int i = 0; i < reference_file->header->n_targets; i++) {
-            region_trees[i] = new IntervalTree<region_t*>(intervals[i]);
-        }
+        write_qnames_indices(workspace, host_reads);
 
-        mtx_regions = new std::mutex[reference_regions.size()];
+        mtx_regions = new std::mutex[host_regions.size()];
 
         ctpl::thread_pool thread_pool2(config.threads);
         futures.clear();
 
         int reads_chunks = config.threads * 5;
-        int reads_per_thread = reference_reads.size() / reads_chunks;
+        int reads_per_thread = host_reads.size() / reads_chunks;
 
         for (int i = 0; i < reads_chunks - 1; i++) {
-            std::future<void> future = thread_pool2.push(associate_reads_to_regions, &reference_reads, &region_trees,
+            std::future<void> future = thread_pool2.push(associate_reads_to_regions, &host_reads,// &region_trees,
                     i * reads_per_thread, (i + 1) * reads_per_thread);
             futures.push_back(std::move(future));
         }
-        future = thread_pool2.push(associate_reads_to_regions, &reference_reads, &region_trees,
-                (reads_chunks - 1) * reads_per_thread, reference_reads.size());
+        future = thread_pool2.push(associate_reads_to_regions, &host_reads,// &region_trees,
+                (reads_chunks - 1) * reads_per_thread, host_reads.size());
         futures.push_back(std::move(future));
 
         thread_pool2.stop(true);
@@ -866,14 +1114,33 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        scores_file_out.close();
+        std::ofstream cigar_map_out(workspace + "/cigars-map");
+        for (auto& e : cigar_ids) {
+            cigar_map_out << e.second << " " << e.first << std::endl;
+        }
+        cigar_map_out.close();
+
+        // sort regions by number of matched reads, descending
+        std::vector<int> sorted_regions_id, sorted_regions_id_rc;
+        for (int i = 0; i < host_regions.size(); i++) {
+            sorted_regions_id.push_back(i);
+            sorted_regions_id_rc.push_back(i);
+        }
+        std::sort(sorted_regions_id.begin(), sorted_regions_id.end(), [](const int i1, const int i2) {
+            return reads_per_region[i1].size() > reads_per_region[i2].size();
+        });
+        std::sort(sorted_regions_id_rc.begin(), sorted_regions_id_rc.end(), [](const int i1, const int i2) {
+            return reads_per_region_rc[i1].size() > reads_per_region_rc[i2].size();
+        });
+
+        fclose(scores_file_out_bin);
         /* ==== */
     }
 
     /* ====== */
 
     // sort reads-region associations by score
-    for (int i = 0; i < reference_regions.size(); i++) {
+    for (int i = 0; i < host_regions.size(); i++) {
         auto read_score_cmp = [](const read_and_score_t& ras1, const read_and_score_t& ras2) {
             return ras1.realign_info.score > ras2.realign_info.score;
         };
@@ -882,80 +1149,122 @@ int main(int argc, char* argv[]) {
     }
 
 
+    /* === COMPUTE INTEGRATIONS === */
+
     std::unordered_set<bam1_t*> already_used;
 
-    auto region_score_cmp = [](const region_score_t& r1, const region_score_t& r2) {return r1.score < r2.score;};
+    auto region_score_cmp = [](const region_score_t& r1, const region_score_t& r2) {
+        if (r1.score == r2.score) return r1.id < r2.id;
+        return r1.score < r2.score;
+    };
     std::priority_queue<region_score_t, std::vector<region_score_t>, decltype(region_score_cmp)> region_scores(region_score_cmp);
 
-    for (region_t* region : reference_regions) {
+    int region_score_id = 0;
+    for (region_t* region : host_regions) {
         std::pair<int, int> score_and_reads = compute_region_score(region, false, already_used);
 
         int score = score_and_reads.first;
         int reads = score_and_reads.second;
-        if (score > 0) region_scores.push(region_score_t(region, true, score, reads));
+        if (score > 0) region_scores.push(region_score_t(region_score_id++, region, true, score, reads));
 
         score_and_reads = compute_region_score(region, true, already_used);
         score = score_and_reads.first;
         reads = score_and_reads.second;
-        if (score > 0) region_scores.push(region_score_t(region, false, score, reads));
+        if (score > 0) region_scores.push(region_score_t(region_score_id++, region, false, score, reads));
     }
 
-    int id = 1;
-    int prev = 0;
+
+    virus_reads_seqs.push_back(read_seq_t());
+
     std::vector<bam1_t*> remapped;
-    bool has_been_remapped = true;
-    do {
-        std::vector<std::pair<bam1_t*, int> > not_remapped, remapped_now;
+    while (!region_scores.empty()) {
+
+        int best_region_score_id = -1;
+        std::vector<read_and_score_t> virus_read_scores;
+        std::pair<region_t*, bool> best_virus_region;
+        while (!region_scores.empty()) {
+            region_score_t best_region_score = region_scores.top();
+            if (best_region_score.id == best_region_score_id) {
+                std::cerr << "CONFIRMED TOP REGION: " << best_region_score.to_str() << std::endl;
+                break;
+            }
+            region_scores.pop();
+
+            best_region_score_id = best_region_score.id;
+
+            std::cerr << "CURRENT TOP REGION: " << best_region_score.to_str() << std::endl;
+
+            // remap virus reads and find best virus regions
+            virus_read_scores.clear();
+            best_virus_region = remap_virus_reads(best_region_score, virus_read_scores, virus_reads_by_name, already_used);
+
+            if (best_virus_region.first == NULL) continue;
+
+            region_scores.push(best_region_score);
+        }
 
         if (region_scores.empty()) break;
 
-        while (true) {
-            region_score_t top_region = region_scores.top();
-
-            region_t* best_region = top_region.region;
-            bool fwd = top_region.fwd;
-            auto score_and_reads = compute_region_score(best_region, !fwd, already_used);
-            int new_score = score_and_reads.first;
-            int new_reads = score_and_reads.second;
-            int score = top_region.score;
-
-            if (score == new_score) break;
-
-            region_scores.pop();
-            top_region.score = new_score;
-            top_region.reads = new_reads;
-            region_scores.push(top_region);
-        }
-
         region_t* best_region = region_scores.top().region;
         bool fwd = region_scores.top().fwd;
-        int score = region_scores.top().score;
-        int reads = region_scores.top().reads;
-        if (score == 0) break;
-
-        std::vector<read_and_score_t>& read_scores = fwd ? reads_per_region[best_region->id] : reads_per_region_rc[best_region->id];
-        std::vector<bam1_t*> remapped_reads_mates;
-        for (read_and_score_t read_score : read_scores) {
-            std::string qname = bam_get_qname(read_score.read);
-            remapped_reads_mates.push_back(virus_reads_by_name[qname]);
+        if (region_scores.top().score == 0) {
+            std::cerr << "REMAINING REGIONS HAVE SCORE 0" << std::endl;
+            break;
         }
 
-        edit_remapped_reads(best_region, !fwd, already_used);
 
-        samFile* writer = open_bam_writer(workspace+"/readsx", std::to_string(virus_integration_id)+".bam", reference_file->header);
-        if (read_scores.size() > 1) {
-//            std::sort(read_scores.begin(), read_scores.end(), [](const read_and_score_t& r1, const read_and_score_t& r2) {
-//                if (r1.read->core.tid != r2.read->core.tid) return r1.read->core.tid < r2.read->core.tid;
-//                return r1.read->core.pos < r2.read->core.pos;
-//            });
-            for (read_and_score_t read_and_score : read_scores) {
-                int ok = sam_write1(writer, reference_file->header, read_and_score.read);
+        // remove host reads s.t. the virus read was not remapped to best virus region
+        std::vector<read_and_score_t>& host_read_scores = fwd ? reads_per_region[best_region->id] : reads_per_region_rc[best_region->id];
+        std::unordered_set<std::string> remapped_virus_qnames;
+        for (read_and_score_t read_and_score : virus_read_scores) {
+            remapped_virus_qnames.insert(bam_get_qname(read_and_score.read));
+        }
+        host_read_scores.erase(
+                std::remove_if(host_read_scores.begin(), host_read_scores.end(), [&remapped_virus_qnames](read_and_score_t& ras) {
+                    return !remapped_virus_qnames.count(bam_get_qname(ras.read));
+                }),
+                host_read_scores.end());
+
+
+        std::cerr << "HOST READS: " << host_read_scores.size() << std::endl;
+
+//        std::cerr << "VIRUS READS: " << remapped_reads_mates.size() << " " << remapped_host_anchors.size() << std::endl;
+//        samFile* original_writer = open_bam_writer(workspace+"/original_readsx", std::to_string(virus_integration_id)+".bam", host_and_virus_file->header);
+//        edit_remapped_reads(best_region, host_read_scores, !fwd);
+//        for (read_and_score_t read_and_score : host_read_scores) {
+//            int ok = sam_write1(original_writer, host_and_virus_file->header, read_and_score.read);
+//            if (ok < 0) throw "Failed to write to " + std::string(original_writer->fn);
+//        }
+//        for (read_and_score_t read_and_score : remapped_reads_mates) {
+//            int ok = sam_write1(original_writer, host_and_virus_file->header, read_and_score.read);
+//            if (ok < 0) throw "Failed to write to " + std::string(original_writer->fn);
+//        }
+//        for (read_and_score_t read_and_score : remapped_host_anchors) {
+//            int ok = sam_write1(original_writer, host_and_virus_file->header, read_and_score.read);
+//            if (ok < 0) throw "Failed to write to " + std::string(original_writer->fn);
+//        }
+//        sam_close(original_writer);
+
+//        if (virus_regions.empty()) {
+//            std::cerr << "NO VIRUS REGIONS???" << " " << remapped_reads_mates.size() << std::endl;
+//            break;
+//        }
+
+        edit_remapped_reads(best_virus_region.first, virus_read_scores, !best_virus_region.second);
+//        std::cerr << "KEPT VIRUS READS: " << virus_read_scores.size() << std::endl;
+
+
+        edit_remapped_reads(best_region, host_read_scores, !fwd);
+
+        samFile* writer = open_bam_writer(workspace+"/readsx", std::to_string(virus_integration_id)+".bam", host_and_virus_file->header);
+        if (host_read_scores.size() > 1) {
+            for (read_and_score_t read_and_score : host_read_scores) {
+                int ok = sam_write1(writer, host_and_virus_file->header, read_and_score.read);
                 if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
-
-                std::string qname = bam_get_qname(read_and_score.read);
-//                ok = sam_write1(writer, reference_file->header, virus_reads_by_name[qname]);
-//                if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
-
+            }
+            for (read_and_score_t read_and_score : virus_read_scores) {
+                int ok = sam_write1(writer, host_and_virus_file->header, read_and_score.read);
+                if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
             }
         }
         sam_close(writer);
@@ -972,28 +1281,45 @@ int main(int argc, char* argv[]) {
         }
 
         {
-            virus_integration_t v_int(best_region->contig_id, fwd ? best_region->end : best_region->start,
-                                      fwd ? 'R' : 'L', reads, score);
-            std::cout << v_int.to_str() << std::endl;
+            int score = 0, min_pos = INT32_MAX, max_pos = 0;
+            for (read_and_score_t& ras : host_read_scores) {
+                min_pos = std::min(min_pos, ras.read->core.pos);
+                max_pos = std::max(max_pos, bam_endpos(ras.read));
+                score += ras.realign_info.score;
+            }
+            virus_integration_t v_int(best_region->contig_id, fwd ? max_pos : min_pos,
+                                      fwd ? 'R' : 'L', host_read_scores.size(), score);
+            std::cout << v_int.to_str() << "\t" << region_scores.top().reads << " " << region_scores.top().score <<
+            std::endl << std::endl;
         }
 
-        std::vector<read_and_score_t>& used_reads = fwd ? reads_per_region[best_region->id] : reads_per_region_rc[best_region->id];
-        for (read_and_score_t read_and_score : used_reads) {
+        for (read_and_score_t read_and_score : host_read_scores) {
             already_used.insert(read_and_score.read);
         }
 
-        std::cout << "ALREADY USED: " << already_used.size() << std::endl << std::endl;
-    } while (has_been_remapped);
+        std::cerr << "ALREADY USED: " << already_used.size() << std::endl << std::endl;
+
+        region_scores.pop();
+        std::cerr << "REMAINING REGIONS: " << region_scores.size() << std::endl;
+    }
+
+    /* ==== */
 
 
-    samFile* reference_remapped_file = open_bam_writer(workspace, "reference-remapped.bam", reference_file->header);
+//    std::cerr << "VIRUS REMAPPINGS: " << virus_remappings << std::endl;
+//    std::cerr << "VIRUS REGIONS REMAPPED: " << virus_regions_remapped << std::endl;
+
+
+    samFile* reference_remapped_file = open_bam_writer(workspace, "reference-remapped.bam", host_file->header);
     for (bam1_t* read : remapped) {
-        int ok = sam_write1(reference_remapped_file, reference_file->header, read);
+        int ok = sam_write1(reference_remapped_file, host_file->header, read);
         if (ok < 0) throw "Failed to write to " + std::string(reference_remapped_file->fn);
     }
 
     sam_close(reference_remapped_file);
 
-    close_samFile(reference_file);
+    close_samFile(host_file);
+    close_samFile(host_and_virus_file);
 }
+
 

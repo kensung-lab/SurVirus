@@ -141,15 +141,8 @@ std::string get_cigar_code(bam1_t* r) {
     return get_cigar_code(bam_get_cigar(r), r->core.n_cigar);
 }
 
-bool is_first_in_pair(bam1_t* r, disc_type_t dt) {
-    if (dt == DISC_TYPES.UM) return true;
-    else if (dt == DISC_TYPES.DC) {
-        return r->core.qual >= get_mq(r);
-    } else if (dt == DISC_TYPES.SS || dt == DISC_TYPES.SI || dt == DISC_TYPES.LI) {
-        return r->core.pos < r->core.mpos;
-    } else if (dt == DISC_TYPES.OW) {
-        return r->core.flag & BAM_FREVERSE;
-    } else return false;
+bool is_first_in_pair(bam1_t* r) {
+    return r->core.flag & BAM_FREAD1;
 }
 
 int get_mate_endpos(bam1_t* r) {
@@ -331,14 +324,14 @@ void get_rc(char *read, int len) {
     }
 }
 
-std::string get_sequence(bam1_t* r, bool consider_rc = false) {
+std::string get_sequence(bam1_t* r, bool original_seq = false) { // if original_seq == true, return the sequence found in fastx file
     char seq[MAX_READ_SUPPORTED];
     const uint8_t* bam_seq = bam_get_seq(r);
     for (int i = 0; i < r->core.l_qseq; i++) {
         seq[i] = get_base(bam_seq, i);
     }
     seq[r->core.l_qseq] = '\0';
-    if (consider_rc && bam_is_rev(r)) get_rc(seq, r->core.l_qseq);
+    if (original_seq && bam_is_rev(r)) get_rc(seq, r->core.l_qseq);
     return std::string(seq);
 }
 
