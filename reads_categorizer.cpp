@@ -253,9 +253,9 @@ int main(int argc, char* argv[]) {
 
     std::vector<bam1_t*> virus_side_reads, reference_side_reads;
     samFile* virus_anchor_writer = open_bam_writer(workspace, "virus-anchors.bam", header);
-    samFile* reference_anchor_writer = open_bam_writer(workspace, "reference-anchors.bam", header);
+    samFile* reference_anchor_writer = open_bam_writer(workspace, "host-anchors.bam", header);
     virus_clip_out.open(workspace + "/virus-clips.fa");
-    reference_clip_out.open(workspace + "/reference-clips.fa");
+    reference_clip_out.open(workspace + "/host-clips.fa");
 
     std::vector<std::future<void> > futures;
     for (int i = 0; i < header->n_targets; i++) {
@@ -288,7 +288,7 @@ int main(int argc, char* argv[]) {
     }
 
     // extract and sort shared reads
-    std::vector<bam1_t*> final_virus_reads, final_reference_reads;
+    std::vector<bam1_t*> final_virus_reads, final_host_reads;
     for (bam1_t* r : virus_side_reads) {
         if (shared_qnames.count(bam_get_qname(r))) {
             final_virus_reads.push_back(r);
@@ -298,15 +298,15 @@ int main(int argc, char* argv[]) {
         return strcmp(bam_get_qname(r1), bam_get_qname(r2)) < 0;});
     for (bam1_t* r : reference_side_reads) {
         if (shared_qnames.count(bam_get_qname(r))) {
-            final_reference_reads.push_back(r);
+            final_host_reads.push_back(r);
         }
     }
-    std::sort(final_reference_reads.begin(), final_reference_reads.end(), [](const bam1_t* r1, const bam1_t* r2) {
+    std::sort(final_host_reads.begin(), final_host_reads.end(), [](const bam1_t* r1, const bam1_t* r2) {
         return strcmp(bam_get_qname(r1), bam_get_qname(r2)) < 0;});
 
-    std::ofstream virus_fq(workspace + "/virus-side.fq"), reference_fq(workspace + "/reference-side.fq");
-    for (bam1_t* r : final_reference_reads) {
-        reference_fq << print_fq(r);
+    std::ofstream virus_fq(workspace + "/virus-side.fq"), host_fq(workspace + "/host-side.fq");
+    for (bam1_t* r : final_host_reads) {
+        host_fq << print_fq(r);
     }
     for (bam1_t* r : final_virus_reads) {
         virus_fq << print_fq(r);
