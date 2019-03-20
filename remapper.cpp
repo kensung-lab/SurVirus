@@ -50,22 +50,37 @@ char nucl2chr[16];
 
 std::atomic<int> virus_integration_id(0);
 
-struct virus_integration_t {
-    int id;
+struct int_breakpoint_t {
     int contig_id;
-    int pos;
-    char dir;
-    int reads, score;
+    int min_pos, max_pos;
+    bool fwd;
 
-    virus_integration_t(int contig_id, int pos, char dir, int reads, int score) :
-    id(virus_integration_id++), contig_id(contig_id), pos(pos), dir(dir), reads(reads), score(score) {}
+    int_breakpoint_t(int contig_id, int min_pos, int max_pos, bool fwd) : contig_id(contig_id), min_pos(min_pos),
+                                                                          max_pos(max_pos), fwd(fwd) {}
+
+    int bp() {
+        return fwd ? max_pos : min_pos;
+    }
 
     std::string to_str() {
-        std::stringstream ss;
-        ss << "ID=" << id << " " << contig_id2name[contig_id] << " " << pos << " " << pos
-           << " " << reads << " " << (dir == 'R' ? reads : 0) << " "
-           << (dir == 'R' ? 0 : reads) << " " << score;
-        return ss.str();
+        char buffer[4096];
+        sprintf(buffer, "%s:%c%d", contig_id2name[contig_id].c_str(), fwd ? '+' : '-', bp());
+        return buffer;
+    }
+};
+struct virus_integration_t {
+
+    int id;
+    int_breakpoint_t host_bp, virus_bp;
+    int reads, score;
+
+    virus_integration_t(int contig_id, int_breakpoint_t& host_bp, int_breakpoint_t& virus_bp, int reads, int score) :
+    id(virus_integration_id++), host_bp(host_bp), virus_bp(virus_bp), reads(reads), score(score) {}
+
+    std::string to_str() {
+        char buffer[4096];
+        sprintf(buffer, "ID=%d %s %s %d %d", id, host_bp.to_str().c_str(), virus_bp.to_str().c_str(), reads, score);
+        return buffer;
     }
 };
 
@@ -1250,48 +1265,52 @@ int main(int argc, char* argv[]) {
 //            break;
 //        }
 
-        edit_remapped_reads(best_virus_region.first, virus_read_scores, !best_virus_region.second);
-//        std::cerr << "KEPT VIRUS READS: " << virus_read_scores.size() << std::endl;
-
-
-        edit_remapped_reads(best_region, host_read_scores, !fwd);
-
         samFile* writer = open_bam_writer(workspace+"/readsx", std::to_string(virus_integration_id)+".bam", host_and_virus_file->header);
-        if (host_read_scores.size() > 1) {
-            for (read_and_score_t read_and_score : host_read_scores) {
-                int ok = sam_write1(writer, host_and_virus_file->header, read_and_score.read);
-                if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
-            }
-            for (read_and_score_t read_and_score : virus_read_scores) {
-                int ok = sam_write1(writer, host_and_virus_file->header, read_and_score.read);
-                if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
-            }
+
+        // edit virus reads and find host bp
+        edit_remapped_reads(best_virus_region.first, virus_read_scores, !best_virus_region.second);
+        for (read_and_score_t read_and_score : virus_read_scores) {
+            int ok = sam_write1(writer, host_and_virus_file->header, read_and_score.read);
+            if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
         }
+        int v_min_pos = INT32_MAX, v_max_pos = 0;
+        for (read_and_score_t& ras : virus_read_scores) {
+            v_min_pos = std::min(v_min_pos, ras.read->core.pos);
+            v_max_pos = std::max(v_max_pos, bam_endpos(ras.read));
+        }
+        int_breakpoint_t virus_bp(best_virus_region.first->contig_id, v_min_pos, v_max_pos, best_virus_region.second);
+
+        // edit host reads and find host bp
+        edit_remapped_reads(best_region, host_read_scores, !fwd);
+        for (read_and_score_t read_and_score : host_read_scores) {
+            int ok = sam_write1(writer, host_and_virus_file->header, read_and_score.read);
+            if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
+        }
+        int score = 0, h_min_pos = INT32_MAX, h_max_pos = 0;
+        for (read_and_score_t& ras : host_read_scores) {
+            h_min_pos = std::min(h_min_pos, ras.read->core.pos);
+            h_max_pos = std::max(h_max_pos, bam_endpos(ras.read));
+            score += ras.realign_info.score;
+        }
+        int_breakpoint_t host_bp(best_region->contig_id, h_min_pos, h_max_pos, fwd);
+
         sam_close(writer);
 
-        std::vector<region_score_t> top10;
-        for (int i = 0; i < 10 && !region_scores.empty(); i++) {
-            top10.push_back(region_scores.top());
-            region_scores.pop();
-            std::cout << top10[i].region->to_str() << " " << (top10[i].fwd ? fwd_char : rev_char) << " "
-            << top10[i].reads << " " << top10[i].score << std::endl;
-        }
-        for (int i = 0; i < top10.size(); i++) {
-            region_scores.push(top10[i]);
-        }
+        // TODO: after virus remapping, this does not make sense as it currently is
+//        std::vector<region_score_t> top10;
+//        for (int i = 0; i < 10 && !region_scores.empty(); i++) {
+//            top10.push_back(region_scores.top());
+//            region_scores.pop();
+//            std::cout << top10[i].region->to_str() << " " << (top10[i].fwd ? fwd_char : rev_char) << " "
+//            << top10[i].reads << " " << top10[i].score << std::endl;
+//        }
+//        for (int i = 0; i < top10.size(); i++) {
+//            region_scores.push(top10[i]);
+//        }
 
-        {
-            int score = 0, min_pos = INT32_MAX, max_pos = 0;
-            for (read_and_score_t& ras : host_read_scores) {
-                min_pos = std::min(min_pos, ras.read->core.pos);
-                max_pos = std::max(max_pos, bam_endpos(ras.read));
-                score += ras.realign_info.score;
-            }
-            virus_integration_t v_int(best_region->contig_id, fwd ? max_pos : min_pos,
-                                      fwd ? 'R' : 'L', host_read_scores.size(), score);
-            std::cout << v_int.to_str() << "\t" << region_scores.top().reads << " " << region_scores.top().score <<
-            std::endl << std::endl;
-        }
+        virus_integration_t v_int(best_region->contig_id, host_bp, virus_bp,
+                                  host_read_scores.size(), score);
+        std::cout << v_int.to_str() << std::endl;
 
         for (read_and_score_t read_and_score : host_read_scores) {
             already_used.insert(read_and_score.read);
