@@ -716,9 +716,18 @@ int remap_virus_reads_supp(region_t* region, std::vector<uint64_t>& read_seq_ids
     }
     int clip_pos = std::distance(clip_positions, std::max_element(clip_positions, clip_positions+region->len()));
 
+    int accept_window_start, accept_window_end;
+    if (rc) {
+        accept_window_start = clip_pos;
+        accept_window_end = accept_window_start + stats.max_is;
+    } else {
+        accept_window_end = clip_pos;
+        accept_window_start = accept_window_end - stats.max_is;
+    }
+
     int score = 0;
     for (read_and_score_t& ras : virus_read_scores_local) {
-        if ((rc && ras.realign_info.offset_start >= clip_pos) || (!rc && ras.realign_info.offset_end <= clip_pos)) {
+        if (ras.realign_info.offset_start >= accept_window_start && ras.realign_info.offset_end <= accept_window_end) {
             score += ras.realign_info.score;
             if (virus_read_scores != NULL) {
                 virus_read_scores->push_back(ras);
@@ -786,12 +795,13 @@ std::pair<region_t*, bool> remap_virus_reads(region_score_t& host_region_score, 
         if (!anchor->id) {
             anchor->id = virus_read_id++;
             std::string clip;
-            if (is_right_clipped(anchor)) {
-                clip = get_sequence(anchor).substr(anchor->core.l_qseq-get_right_clip_len(anchor), get_right_clip_len(anchor));
-                get_rc(clip);
-            } else {
-                clip = get_sequence(anchor).substr(0, get_left_clip_len(anchor));
-            }
+//            if (is_right_clipped(anchor)) {
+//                clip = get_sequence(anchor).substr(anchor->core.l_qseq-get_right_clip_len(anchor), get_right_clip_len(anchor));
+//                get_rc(clip);
+//            } else {
+//                clip = get_sequence(anchor).substr(0, get_left_clip_len(anchor));
+//            }
+            clip = get_sequence(anchor, true);
             virus_reads_seqs.push_back(read_seq_t(anchor, clip));
         }
         read_seq_ids.push_back(anchor->id);
