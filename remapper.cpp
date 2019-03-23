@@ -193,7 +193,7 @@ void extract_regions(std::vector<bam1_t *>& reads, std::vector<region_t*>& regio
         if (xa != NULL && process_xa) {
             std::string xa_s = bam_aux2Z(xa);
             size_t pos = 0, prev = 0;
-            while ((pos = xa_s.find(';', pos+1)) != std::string::npos) {
+            while ((pos = xa_s.find(';', pos+1)) != std::string::npos) { //TODO: crashes if virus name contains ";"
                 std::string alt_align = xa_s.substr(prev, pos-prev);
                 size_t pos2 = 0;
 
@@ -594,7 +594,7 @@ void edit_remapped_reads(region_t* region, std::vector<read_and_score_t>& read_s
 void write_qnames_indices(std::string& workspace, std::vector<bam1_t *>& reads) {
     std::ofstream qnames_map_out(workspace + "/qnames-map");
     for (int i = 0; i < reads.size(); i++) {
-        qnames_map_out << i << " " << bam_get_qname(reads[i]) << " " << get_cigar_code(reads[i]) << std::endl;
+        qnames_map_out << i << " " << bam_get_qname(reads[i]) << " " << get_sequence(reads[i]) << std::endl;
     }
     qnames_map_out.close();
 }
@@ -602,17 +602,17 @@ void load_qnames_indices(std::string& workspace, std::vector<bam1_t*> reads, std
     std::ifstream qnames_map_in(workspace + "/qnames-map");
 
     std::unordered_map<std::string, std::vector<int> > qname_to_id;
-    int i; std::string qname, cigar;
-    while (qnames_map_in >> i >> qname >> cigar) {
-        qname_to_id[qname + " " + cigar].push_back(i);
+    int i; std::string qname, seq;
+    while (qnames_map_in >> i >> qname >> seq) {
+        qname_to_id[qname + " " + seq].push_back(i);
     }
     qnames_map_in.close();
 
     id_to_read.resize(i+1);
 
     for (bam1_t* r : reads) {
-        std::string qname = bam_get_qname(r), cigar = get_cigar_code(r);
-        for (int i : qname_to_id[qname + " " + cigar]) {
+        std::string qname = bam_get_qname(r), seq = get_sequence(r);
+        for (int i : qname_to_id[qname + " " + seq]) {
             id_to_read[i] = r;
         }
     }
@@ -629,23 +629,6 @@ void load_cigars_indices(std::string& workspace, std::vector<std::pair<int, cons
     id_to_cigar.resize(temp.size()+1);
     for (std::pair<int, std::string>& p : temp) {
         id_to_cigar[p.first] = cigar_str_to_array(p.second);
-    }
-}
-void load_qnames_indices(std::string& workspace, std::vector<bam1_t*> reads, std::unordered_map<uint32_t , bam1_t*>& id_to_read) {
-    std::ifstream qnames_map_in(workspace + "/qnames-map");
-
-    std::unordered_map<std::string, std::vector<int> > qname_to_id;
-    int i; std::string qname, cigar;
-    while (qnames_map_in >> i >> qname >> cigar) {
-        qname_to_id[qname + " " + cigar].push_back(i);
-    }
-    qnames_map_in.close();
-
-    for (bam1_t* r : reads) {
-        std::string qname = bam_get_qname(r), cigar = get_cigar_code(r);
-        for (int i : qname_to_id[qname + " " + cigar]) {
-            id_to_read[i] = r;
-        }
     }
 }
 void load_cigars_indices(std::string& workspace, std::unordered_map<uint32_t, std::pair<int, const uint32_t*> >& id_to_cigar) {
@@ -670,7 +653,6 @@ int remap_virus_reads_supp(region_t* region, std::vector<uint64_t>& read_seq_ids
 
     std::string region_str = (rc ? "-" : "+") + region->to_str();
 
-    // FIXME: reads appearing as both read and anchor should have two different cachings, one as reads and one as anchor
     google::dense_hash_map<uint64_t, read_and_score_t>& cached_region_alignments = cached_virus_alignments[region_str];
     if (!existing_caches.count(region_str)) {
         cached_region_alignments.set_empty_key(0);
@@ -917,7 +899,7 @@ int main(int argc, char* argv[]) {
     // in order to dedup reads inserted twice (perhaps once because of discordant pair and once because of clips)
     std::unordered_set<std::string> host_hashes;
     auto read_hash = [](bam1_t* read) {
-        return std::string(bam_get_qname(read)) + "_" + (is_first_in_pair(read) ? "1" : "2");
+        return std::string(bam_get_qname(read)) + "_" + get_sequence(read);
     };
 
     // extracting paired reference-virus reads
@@ -971,6 +953,32 @@ int main(int argc, char* argv[]) {
         }
     }
     close_samFile(host_anchors_file);
+
+    /* == */
+
+    /* == Pour reads having virus anchor and their clip remapped to host into host_reads == */
+    std::unordered_set<std::string> successful_virus_clips; // host clips that map to host
+    open_samFile_t* virus_clips_file = open_samFile((workspace + "/virus-clips.sorted.bam").data(), true);
+    while (sam_read1(virus_clips_file->file, virus_clips_file->header, read) >= 0) {
+        if (!virus_names.count(virus_clips_file->header->target_name[read->core.tid])) { // seq was mapped to host
+            std::string qname = bam_get_qname(read);
+            successful_virus_clips.insert(qname);
+        }
+    }
+    close_samFile(virus_clips_file);
+
+    open_samFile_t* virus_anchors_file = open_samFile((workspace + "/virus-anchors.sorted.bam").data(), true);
+    while (sam_read1(virus_anchors_file->file, virus_anchors_file->header, read) >= 0) {
+        std::string qname = bam_get_qname(read);
+        if (successful_virus_clips.count(qname)) {
+            std::string h = read_hash(read);
+            if (!host_hashes.count(h)) {
+                host_reads.push_back(bam_dup1(read));
+                host_hashes.insert(h);
+            }
+        }
+    }
+    close_samFile(virus_anchors_file);
 
     /* == */
 
