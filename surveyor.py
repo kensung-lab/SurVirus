@@ -199,7 +199,8 @@ for file_index, bam_file in enumerate(bam_files):
     if not os.path.exists(readsx):
         os.makedirs(readsx)
 
-    remapper_cmd = "./remapper %s %s %s %s > %s/results.txt" \
-                   % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, bam_workspace, bam_workspace)
+    remapper_cmd = "./remapper %s %s %s %s > %s/results.txt 2> %s/log.txt" \
+                   % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, bam_workspace, bam_workspace, \
+                      cmd_args.workdir)
     print "Executing:", remapper_cmd
     os.system(remapper_cmd)
