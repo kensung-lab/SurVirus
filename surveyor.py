@@ -5,7 +5,7 @@ import numpy as np
 from shutil import copyfile
 
 MAX_READS = 1000
-GEN_DIST_SIZE = 100000
+GEN_DIST_SIZE = 500000
 MAX_ACCEPTABLE_IS = 20000
 
 cmd_parser = argparse.ArgumentParser(description='SurVirus, a virus integration caller.')
@@ -143,7 +143,7 @@ for file_index, bam_file in enumerate(bam_files):
     print "Executing:", samtools_dump_cmd
     os.system(samtools_dump_cmd)
 
-    bwa_cmd = "%s mem -t %d %s %s/retained-pairs_1.fq %s/retained-pairs_2.fq | %s view -b > %s/retained-pairs-remapped.bam" \
+    bwa_cmd = "%s mem -t %d %s %s/retained-pairs_1.fq %s/retained-pairs_2.fq | %s view -b -F 2304 > %s/retained-pairs-remapped.bam" \
               % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, \
                  bam_workspace, bam_workspace, cmd_args.samtools, bam_workspace)
     print "Executing:", bwa_cmd

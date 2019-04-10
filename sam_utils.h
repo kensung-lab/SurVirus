@@ -24,16 +24,6 @@ static struct disc_types_t {
     disc_types_t() : UM(1), DC(2), SS(3), OW(4), LI(5), SI(6) {}
 } DISC_TYPES;
 
-std::string dt_to_str(disc_type_t dt) {
-    if (dt == DISC_TYPES.UM) return "UM";
-    else if (dt == DISC_TYPES.DC) return "DC";
-    else if (dt == DISC_TYPES.SS) return "SS";
-    else if (dt == DISC_TYPES.OW) return "OW";
-    else if (dt == DISC_TYPES.LI) return "LI";
-    else if (dt == DISC_TYPES.SI) return "SI";
-    else return "";
-}
-
 bool is_unmapped(bam1_t* r) {
     return r->core.flag & BAM_FUNMAP;
 }
@@ -297,7 +287,7 @@ bool is_poly_ACGT(const char* seq, int len) {
     return double(maxc)/len >= 0.8;
 }
 
-void get_rc(std::string &read) {
+void get_rc(std::string& read) {
     int len = read.length();
     for (int i = 0; i < len/2; i++) {
         std::swap(read[i], read[len-i-1]);
@@ -335,6 +325,16 @@ std::string get_sequence(bam1_t* r, bool original_seq = false) { // if original_
     return std::string(seq);
 }
 
+std::string get_clip(bam1_t* read) {
+    std::string seq = get_sequence(read);
+    if (is_left_clipped(read)) {
+        return seq.substr(0, get_left_clip_len(read));
+    } else if (is_right_clipped(read)) {
+        return seq.substr(seq.length()- get_right_clip_len(read)-1, get_right_clip_len(read));
+    } else {
+        return "";
+    }
+}
 
 std::pair<int, const uint32_t*> cigar_str_to_array(std::string& cigar_str) {
     std::vector<uint32_t> opv;

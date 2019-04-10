@@ -21,12 +21,9 @@ KSEQ_INIT(int, read)
 config_t config;
 std::unordered_map<std::string, int> contig_name2id;
 std::vector<int> tid_to_contig_id;
-std::vector<std::ofstream*> mate_seqs_writers_by_tid; // indexed by tid, not contig_id
 std::unordered_set<std::string> virus_names;
 
 std::mutex mtx;
-
-std::ofstream virus_clip_out, reference_clip_out;
 
 const int MAX_BUFFER_SIZE = 100;
 
@@ -42,29 +39,13 @@ bam1_t* add_to_queue(std::deque<bam1_t*>& q, bam1_t* o, int size_limit) {
 }
 
 void categorize(int id, std::string contig, std::string bam_fname, int target_len, std::vector<bam1_t*>* virus_side_reads,
-                std::vector<bam1_t*>* reference_side_reads, samFile* anchor_writer, std::ofstream* clip_writer) {
+                std::vector<bam1_t*>* host_side_reads, std::vector<bam1_t*>* anchor_reads) {
 
     open_samFile_t* bam_file_open = open_samFile(bam_fname.data());
 
     samFile* bam_file = bam_file_open->file;
-//    samFile* bam_file = sam_open(bam_fname.c_str(), "r");
-//    if (bam_file == NULL) {
-//        throw "Unable to open BAM file.";
-//    }
-//
     hts_idx_t* idx = bam_file_open->idx;
-//    hts_idx_t* idx = sam_index_load(bam_file, bam_fname.c_str());
-//    if (idx == NULL) {
-//        throw "Unable to open BAM index.";
-//    }
-//
     bam_hdr_t* header = bam_file_open->header;
-//    bam_hdr_t* header = sam_hdr_read(bam_file);
-//    if (header == NULL) {
-//        throw "Unable to open BAM header.";
-//    }
-
-    int contig_id = contig_name2id[contig];
 
     char region[1000];
     sprintf(region, "%s:%d-%d", contig.c_str(), 1, target_len);
@@ -101,91 +82,33 @@ void categorize(int id, std::string contig, std::string bam_fname, int target_le
             }
         }
 
-        bam1_t* read = forward_buffer.front();
+        bam1_t* read = bam_dup1(forward_buffer.front());
         forward_buffer.pop_front();
 
-//        if (is_clipped(read, true) && !is_primary(read) && !virus_names.count(header->target_name[read->core.tid])) {
-//            std::string target_name = header->target_name[read->core.tid];
-//            std::string sa_target_name = bam_aux2Z(bam_aux_get(read, "SA"));
-//            sa_target_name = sa_target_name.substr(0, sa_target_name.find(','));
-//            if (!virus_names.count(target_name) && virus_names.count(sa_target_name)) {
-//                std::cout << bam_get_qname(read) << " " << target_name << " " << sa_target_name << " "
-//                << get_sequence(read) << std::endl;
-//            }
-//            continue;
-//        }
-
-//        bam_aux_get(read, "MQ");
-//        int64_t mq = get_mq(read);
-//        if (read->core.qual < MIN_MAPQ && mq < MIN_MAPQ) continue;
+        bool to_be_written = false;
 
         // clipped read
         if (is_clipped(read) && get_clip_len(read) >= config.min_sv_len) {
-            // && check_SNP(read, two_way_buffer, config.avg_depth)) {
             mtx.lock();
-            int ok = sam_write1(anchor_writer, header, read);
-            std::string seq = get_sequence(read);
-            *clip_writer << ">" << bam_get_qname(read) << "\n";
-            if (is_left_clipped(read)) {
-                *clip_writer << seq.substr(0, get_left_clip_len(read)) << "\n";
-            } else if (is_right_clipped(read)) {
-                *clip_writer << seq.substr(seq.length()- get_right_clip_len(read)-1, get_right_clip_len(read)) << "\n";
-            }
+            anchor_reads->push_back(read);
             mtx.unlock();
-            if (ok < 0) throw "Failed to write to " + std::string(anchor_writer->fn);
+            to_be_written = true;
         }
 
-//        // we accept one of the mates having mapq 0 only if they are on different chromosomes
-//        if ((read->core.qual < MIN_MAPQ || mq < MIN_MAPQ)
-//            && !is_dc_pair(read) && !is_mate_unmapped(read)) {
-//            continue;
-//        }
-
         if (is_dc_pair(read) && get_avg_qual(read) > 10 && !is_poly_ACGT(read, true)) {
-
             std::string target_name = header->target_name[read->core.tid];
             std::string mate_target_name = header->target_name[read->core.mtid];
             mtx.lock();
             if (virus_names.count(target_name) > 0 && virus_names.count(mate_target_name) == 0) { // virus side
-                virus_side_reads->push_back(bam_dup1(read));
-//                int ok = sam_write1(virus_side_writer, header, read);
-//                if (ok < 0) throw "Failed to write to " + std::string(virus_side_writer->fn);
+                virus_side_reads->push_back(read);
             } else if (virus_names.count(target_name) == 0 && virus_names.count(mate_target_name) > 0) { // reference side
-                reference_side_reads->push_back(bam_dup1(read));
-//                int ok = sam_write1(reference_side_writer, header, read);
-//                if (ok < 0) throw "Failed to write to " + std::string(reference_side_writer->fn);
+                host_side_reads->push_back(read);
             }
             mtx.unlock();
-
-
-//                if (read->core.qual >= mq && check_SNP(read, two_way_buffer, config.avg_depth)) { // stable end
-//                    if ((bam_is_rev(read) && !is_right_clipped(read)) || (!bam_is_rev(read) && !is_left_clipped(read))) {
-//                        int ok = sam_write1(bam_is_rev(read) ? ldc_writer : rdc_writer, header, read);
-//                        if (ok < 0) throw "Failed to write to " + std::string(clip_writer->fn);
-//                    }
-//                }
-//                if (read->core.qual <= mq) { // save read seq for remapping
-//                    const uint8_t* read_seq = bam_get_seq(read);
-//                    char read_seq_chr[MAX_READ_SUPPORTED];
-//                    for (int i = 0; i < read->core.l_qseq; i++) {
-//                        read_seq_chr[i] = get_base(read_seq, i);
-//                    }
-//                    read_seq_chr[read->core.l_qseq] = '\0';
-//                    mtx.lock();
-//                    if (bam_is_rev(read)) {
-//                        get_rc(read_seq_chr);
-//                    }
-//                    std::string qname = bam_get_qname(read);
-//                    if (is_samechr(read)) {
-//                        if (read->core.isize > 0) qname += "_1";
-//                        else qname += "_2";
-//                    }
-//                    *mate_seqs_writers_by_tid[read->core.mtid] << qname << " ";
-//                    *mate_seqs_writers_by_tid[read->core.mtid] << read_seq_chr << "\n";
-//                    mtx.unlock();
-//                }
-//            }
+            to_be_written = true;
         }
+
+        if (!to_be_written) bam_destroy1(read);
     }
 
     close_samFile(bam_file_open);
@@ -245,25 +168,16 @@ int main(int argc, char* argv[]) {
 
     bam_hdr_t* header = sam_hdr_read(bam_file);
     tid_to_contig_id.resize(header->n_targets);
-//    for (int i = 0; i < header->n_targets; i++) {
-//        int contig_id = contig_name2id[std::string(header->target_name[i])];
-//        std::string fname = std::to_string(contig_id) + "-MATESEQS";
-//        mate_seqs_writers_by_tid.push_back(new std::ofstream(workdir + "/workspace/" + fname));
-//    }
 
-    std::vector<bam1_t*> virus_side_reads, reference_side_reads;
-    samFile* virus_anchor_writer = open_bam_writer(workspace, "virus-anchors.bam", header);
-    samFile* reference_anchor_writer = open_bam_writer(workspace, "host-anchors.bam", header);
-    virus_clip_out.open(workspace + "/virus-clips.fa");
-    reference_clip_out.open(workspace + "/host-clips.fa");
+    std::vector<bam1_t*> virus_side_reads, host_side_reads;
+    std::vector<bam1_t*> virus_anchors, host_anchors;
 
     std::vector<std::future<void> > futures;
     for (int i = 0; i < header->n_targets; i++) {
         bool is_virus = virus_names.count(header->target_name[i]);
         std::future<void> future = thread_pool.push(categorize, header->target_name[i], bam_fname, header->target_len[i],
-                                                    &virus_side_reads, &reference_side_reads,
-                                                    is_virus ? virus_anchor_writer : reference_anchor_writer,
-                                                    is_virus ? &virus_clip_out : &reference_clip_out);
+                                                    &virus_side_reads, &host_side_reads,
+                                                    is_virus ? &virus_anchors : &host_anchors);
         futures.push_back(std::move(future));
     }
     thread_pool.stop(true);
@@ -281,44 +195,54 @@ int main(int argc, char* argv[]) {
         virus_qnames.insert(bam_get_qname(r));
     }
     std::unordered_set<std::string> shared_qnames;
-    for (bam1_t* r : reference_side_reads) {
+    for (bam1_t* r : host_side_reads) {
         if (virus_qnames.count(bam_get_qname(r))) {
             shared_qnames.insert(bam_get_qname(r));
         }
     }
 
     // extract and sort shared reads
-    std::vector<bam1_t*> final_virus_reads, final_host_reads;
-    for (bam1_t* r : virus_side_reads) {
-        if (shared_qnames.count(bam_get_qname(r))) {
-            final_virus_reads.push_back(r);
-        }
-    }
-    std::sort(final_virus_reads.begin(), final_virus_reads.end(), [](const bam1_t* r1, const bam1_t* r2) {
-        return strcmp(bam_get_qname(r1), bam_get_qname(r2)) < 0;});
-    for (bam1_t* r : reference_side_reads) {
-        if (shared_qnames.count(bam_get_qname(r))) {
-            final_host_reads.push_back(r);
-        }
-    }
-    std::sort(final_host_reads.begin(), final_host_reads.end(), [](const bam1_t* r1, const bam1_t* r2) {
-        return strcmp(bam_get_qname(r1), bam_get_qname(r2)) < 0;});
+    auto is_shared = [&shared_qnames](const bam1_t* r) { return !shared_qnames.count(bam_get_qname(r)); };
+    auto qname_comp = [](const bam1_t* r1, const bam1_t* r2) {
+        return strcmp(bam_get_qname(r1), bam_get_qname(r2)) < 0;};
+
+    host_side_reads.erase(std::remove_if(host_side_reads.begin(), host_side_reads.end(), is_shared), host_side_reads.end());
+    std::sort(host_side_reads.begin(), host_side_reads.end(), qname_comp);
+
+    virus_side_reads.erase(std::remove_if(virus_side_reads.begin(), virus_side_reads.end(), is_shared), virus_side_reads.end());
+    std::sort(virus_side_reads.begin(), virus_side_reads.end(), qname_comp);
 
     std::ofstream virus_fq(workspace + "/virus-side.fq"), host_fq(workspace + "/host-side.fq");
-    for (bam1_t* r : final_host_reads) {
+    for (bam1_t* r : host_side_reads) {
         host_fq << print_fq(r);
     }
-    for (bam1_t* r : final_virus_reads) {
+    for (bam1_t* r : virus_side_reads) {
         virus_fq << print_fq(r);
     }
 
+    samFile* virus_anchor_writer = open_bam_writer(workspace, "virus-anchors.bam", header);
+    std::ofstream virus_clip_out(workspace + "/virus-clips.fa");
+    std::unordered_set<bam1_t*> virus_side_reads_set(virus_side_reads.begin(), virus_side_reads.end());
+    for (bam1_t* anchor : virus_anchors) {
+        if (virus_side_reads_set.count(anchor)) continue;
+
+        int ok = sam_write1(virus_anchor_writer, header, anchor);
+        if (ok < 0) throw "Failed to write to " + std::string(virus_anchor_writer->fn);
+        virus_clip_out << ">" << bam_get_qname(anchor) << "\n" << get_clip(anchor) << "\n";
+    }
     sam_close(virus_anchor_writer);
-    sam_close(reference_anchor_writer);
-    reference_clip_out.close();
     virus_clip_out.close();
 
-//    for (int i = 0; i < header->n_targets; i++) {
-//        mate_seqs_writers_by_tid[i]->close();
-//        delete mate_seqs_writers_by_tid[i];
-//    }
+    samFile* host_anchor_writer = open_bam_writer(workspace, "host-anchors.bam", header);
+    std::ofstream host_clip_out(workspace + "/host-clips.fa");
+    std::unordered_set<bam1_t*> host_side_reads_set(host_side_reads.begin(), host_side_reads.end());
+    for (bam1_t* anchor : host_anchors) {
+        if (host_side_reads_set.count(anchor)) continue;
+
+        int ok = sam_write1(host_anchor_writer, header, anchor);
+        if (ok < 0) throw "Failed to write to " + std::string(host_anchor_writer->fn);
+        host_clip_out << ">" << bam_get_qname(anchor) << "\n" << get_clip(anchor) << "\n";
+    }
+    sam_close(host_anchor_writer);
+    host_clip_out.close();
 }
