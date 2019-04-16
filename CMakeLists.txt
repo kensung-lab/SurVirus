@@ -15,11 +15,15 @@ add_executable(filter_by_qname ${FILTER_BY_QNAME_SRC})
 set(READS_CATEGORIZER_SRC reads_categorizer.cpp sam_utils.h config.h libs/cptl_stl.h)
 add_executable(reads_categorizer ${READS_CATEGORIZER_SRC})
 
-set(REMAPPER_SRC libs/ssw.c libs/ssw_cpp.cpp remapper.cpp sam_utils.h config.h libs/cptl_stl.h cluster.h libs/IntervalTree.h)
+set(REMAPPER_SRC libs/ssw.c libs/ssw_cpp.cpp remapper.cpp sam_utils.h config.h libs/cptl_stl.h cluster.h)
 add_executable(remapper ${REMAPPER_SRC})
+
+set(GET_REALIGNMENTS_FOR_QNAME get-realignments-for-qname.cpp)
+add_executable(get-realignments-for-qname ${GET_REALIGNMENTS_FOR_QNAME})
 
 find_library(HTS_LIB hts htslib-1.9/lib)
 target_link_libraries(isolate_relevant_pairs "${HTS_LIB}")
 target_link_libraries(filter_by_qname "${HTS_LIB}")
 target_link_libraries(reads_categorizer "${HTS_LIB}")
 target_link_libraries(remapper "${HTS_LIB}")
+target_link_libraries(get-realignments-for-qname "${HTS_LIB}")

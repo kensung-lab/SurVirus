@@ -17,7 +17,7 @@ int MAX_READ_SUPPORTED = 10000;
 struct config_t {
     int threads;
     std::string rmsk_fname = "", simple_rep_fname = "";
-    int min_sv_len, max_sc_dist;
+    int min_sc_size, max_sc_dist;
 };
 
 struct repeat_t {
@@ -79,7 +79,7 @@ config_t parse_config(std::string file) {
 
 //    config.avg_depth = stoi(config_params["avg_depth"]);
 //    config.min_is = stoi(config_params["min_is"]);
-    config.min_sv_len = stoi(config_params["min_sv_len"]);
+    config.min_sc_size = stoi(config_params["min_sv_len"]); // TODO: change into min_sc_size
     config.max_sc_dist = stoi(config_params["max_sc_dist"]);
     return config;
 };

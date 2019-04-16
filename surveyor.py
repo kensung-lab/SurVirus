@@ -2,10 +2,9 @@ import argparse, os
 import pysam, pyfaidx
 from random_pos_generator import RandomPositionGenerator
 import numpy as np
-from shutil import copyfile
 
 MAX_READS = 1000
-GEN_DIST_SIZE = 500000
+GEN_DIST_SIZE = 100000
 MAX_ACCEPTABLE_IS = 20000
 
 cmd_parser = argparse.ArgumentParser(description='SurVirus, a virus integration caller.')
@@ -17,7 +16,16 @@ cmd_parser.add_argument('host_and_virus_reference', help='Joint references of ho
 cmd_parser.add_argument('--threads', type=int, default=1, help='Number of threads to be used.')
 cmd_parser.add_argument('--samtools', help='Samtools path.', default='samtools')
 cmd_parser.add_argument('--bwa', default='bwa', help='BWA path.')
-cmd_parser.add_argument('--minSVLen', type=int, default=18, help='Min SV length.')
+cmd_parser.add_argument('--bedtools', default='bedtools', help='Bedtools path. Necessary if --wgs is not set and'
+                                                               '--coveredRegionsBed is not provided.')
+cmd_parser.add_argument('--wgs', action='store_true', help='The reference genome is uniformly covered by reads.'
+                                                           'SurVirus needs to sample read pairs, and this option lets'
+                                                           'it sample them from all over the genome.')
+cmd_parser.add_argument('--coveredRegionsBed', default='',
+                        help='In case only a few regions of the genome are covered by reads, this directs SurVirus'
+                             'on where to sample reads. In case --wgs is not used and this is not provided,'
+                             'SurVirus will compute such file itself.')
+cmd_parser.add_argument('--minClipSize', type=int, default=18, help='Min size for a clip to be considered.')
 cmd_parser.add_argument('--maxSCDist', type=int, default=10, help='Max SC distance.')
 cmd_args = cmd_parser.parse_args()
 
@@ -26,7 +34,7 @@ cmd_args = cmd_parser.parse_args()
 
 config_file = open(cmd_args.workdir + "/config.txt", "w")
 config_file.write("threads %d\n" % cmd_args.threads)
-config_file.write("min_sv_len %d\n" % cmd_args.minSVLen)
+config_file.write("min_sv_len %d\n" % cmd_args.minClipSize)
 config_file.write("max_sc_dist %d\n" % cmd_args.maxSCDist)
 config_file.close();
 
@@ -55,9 +63,38 @@ reference_fa = pyfaidx.Fasta(cmd_args.virus_reference)
 n_viruses = len(reference_fa.keys())
 
 
-reference_fa = pyfaidx.Fasta(cmd_args.host_reference)
+sampling_regions = []
+if cmd_args.wgs:
+    reference_fa = pyfaidx.Fasta(cmd_args.host_reference)
+    for k in reference_fa.keys():
+        sampling_regions += [(k, 1, len(reference_fa[k]))]
+else:
+    sampling_regions_file = cmd_args.coveredRegionsBed
+    if not sampling_regions_file:
+        bamtobed_cmd = "%s bamtobed -i %s | cut -f-3 | uniq > %s/reads.bed" % (cmd_args.bedtools, bam_names[0], cmd_args.workdir)
+        print "Executing:", bamtobed_cmd
+        os.system(bamtobed_cmd)
 
-rand_pos_gen = RandomPositionGenerator(reference_fa)
+        bedmerge_cmd = "%s merge -i %s/reads.bed -c 1 -o count > %s/reads.merged.bed" \
+                       % (cmd_args.bedtools, cmd_args.workdir, cmd_args.workdir)
+        print "Executing:", bedmerge_cmd
+        os.system(bedmerge_cmd)
+
+        sampling_regions_file = "%s/sampling_regions.bed" % cmd_args.workdir
+        with open(sampling_regions_file, "w") as sr_outf, open("%s/reads.merged.bed" % cmd_args.workdir) as mr_inf:
+            for line in mr_inf:
+                sl = line.split()
+                if int(sl[3]) >= 20:
+                    sr_outf.write("%s\t%s\t%s\n" % tuple(sl[:3]))
+
+    with open(sampling_regions_file) as sr_inf:
+        for line in sr_inf:
+            sl = line.split()
+            sampling_regions += [(sl[0], int(sl[1]), int(sl[2]))]
+
+rand_pos_gen = RandomPositionGenerator(sampling_regions)
+
+print "Generating random genomic positions..."
 random_positions = []
 for i in range(1,GEN_DIST_SIZE*2):
     if i % 100000 == 0: print i, "random positions generated."
@@ -66,7 +103,6 @@ for i in range(1,GEN_DIST_SIZE*2):
 with open("%s/random_pos.txt" % cmd_args.workdir, "w") as random_pos_file:
     for random_pos in random_positions:
         random_pos_file.write("%s %d\n" % random_pos)
-
 
 for file_index, bam_file in enumerate(bam_files):
     read_len = 0
@@ -82,8 +118,8 @@ for file_index, bam_file in enumerate(bam_files):
         chr, pos = random_positions[rnd_i]
         rnd_i += 1
 
-        if pos > len(reference_fa[chr])-10000:
-            continue
+        # if pos > len(reference_fa[chr])-10000:
+        #     continue
 
         samplings += 1
         i = 0

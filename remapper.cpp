@@ -698,11 +698,13 @@ int get_last_max_element(int* v, int len) {
     }
     return max_pos;
 }
-std::pair<int, int> get_accept_window(std::vector<read_realignment_t>& realigned_reads, bool rc, int region_len) {
+std::pair<int, int> get_accept_window(std::vector<read_realignment_t>& realigned_reads, bool rc, int region_len,
+        google::dense_hash_set<std::string>& deduped_qnames) {
 
     int clip_positions[100000];
     std::fill(clip_positions, clip_positions+region_len, 0);
     for (read_realignment_t& rr : realigned_reads) {
+        if (!deduped_qnames.count(bam_get_qname(rr.read))) continue;
         if (rc && rr.is_left_clipped()) {
             clip_positions[rr.offset_start]++;
         }
@@ -718,6 +720,7 @@ std::pair<int, int> get_accept_window(std::vector<read_realignment_t>& realigned
         int score_points[100000];
         std::fill(score_points, score_points+region_len, 0);
         for (read_realignment_t& rr : realigned_reads) {
+            if (!deduped_qnames.count(bam_get_qname(rr.read))) continue;
             score_points[rc ? rr.offset_start : rr.offset_end] += rr.score;
         }
         if (rc) {
@@ -754,195 +757,6 @@ std::pair<int, int> get_accept_window(std::vector<read_realignment_t>& realigned
         accept_window_start = accept_window_end - stats.max_is;
     }
     return {accept_window_start, accept_window_end};
-}
-
-
-const int APPROX_FACTOR = 500;
-std::unordered_set<std::string> existing_caches;
-std::unordered_map<std::string, google::dense_hash_map<uint64_t, read_realignment_t> > cached_virus_alignments;
-
-uint64_t virus_read_id = 1;
-std::vector<read_seq_t> virus_reads_seqs;
-
-std::pair<int,int> remap_virus_reads_supp(region_t* virus_region, bool vregion_rc, std::vector<uint64_t>& read_seq_ids,
-        region_t* host_region, bool hregion_rc, std::vector<read_realignment_t>& host_alignemnts,
-        std::vector<read_realignment_t>* virus_read_realignments,
-        StripedSmithWaterman::Aligner& aligner, StripedSmithWaterman::Filter& filter) {
-
-    std::string region_str = (vregion_rc ? "-" : "+") + virus_region->to_str();
-
-    google::dense_hash_map<uint64_t, read_realignment_t>& cached_region_alignments = cached_virus_alignments[region_str];
-    if (!existing_caches.count(region_str)) {
-        cached_region_alignments.set_empty_key(0);
-        existing_caches.insert(region_str);
-    }
-
-    std::vector<read_realignment_t> host_read_realignments_local, virus_read_realignments_local;
-    for (int i = 0; i < read_seq_ids.size(); i++) {
-        uint64_t read_seq_id = read_seq_ids[i];
-        if (!cached_region_alignments.count(read_seq_id)) {
-            StripedSmithWaterman::Alignment alignment;
-            read_seq_t &read_seq = virus_reads_seqs[read_seq_id];
-            std::string &read_seq_str = vregion_rc ? read_seq.seq_rc : read_seq.seq;
-            aligner.Align(read_seq_str.c_str(), chrs[contig_id2name[virus_region->contig_id]].first + virus_region->start,
-                          virus_region->len(), filter, &alignment, 0);
-
-            if (accept_alignment(alignment, read_seq_str)) {
-                std::string cigar_str = alignment_cigar_to_bam_cigar(alignment.cigar);
-                std::pair<int, const uint32_t *> cigar = cigar_str_to_array(cigar_str);
-                cached_region_alignments[read_seq_id] = read_realignment_t(read_seq.read, alignment.ref_begin, alignment.ref_end,
-                                                                         cigar.first, cigar.second, alignment.sw_score, vregion_rc);
-            } else {
-                // cache failure to align
-                cached_region_alignments[read_seq_id] = read_realignment_t(read_seq.read);
-            }
-        }
-
-        read_realignment_t& ras = cached_region_alignments[read_seq_id];
-        if (!ras.accepted()) continue;
-
-        host_read_realignments_local.push_back(host_alignemnts[i]);
-        virus_read_realignments_local.push_back(ras);
-    }
-
-    int h_score = 0, v_score = 0;
-    std::pair<int,int> host_accept_window = get_accept_window(host_read_realignments_local, hregion_rc, host_region->len());
-    std::pair<int,int> virus_accept_window = get_accept_window(virus_read_realignments_local, vregion_rc, virus_region->len());
-    for (int i = 0; i < virus_read_realignments_local.size(); i++) {
-        read_realignment_t& hras = host_read_realignments_local[i];
-        read_realignment_t& vras = virus_read_realignments_local[i];
-        if (hras.offset_start >= host_accept_window.first && hras.offset_end <= host_accept_window.second
-         && vras.offset_start >= virus_accept_window.first && vras.offset_end <= virus_accept_window.second) {
-            h_score += hras.score;
-            v_score += vras.score;
-            if (virus_read_realignments != NULL) {
-                virus_read_realignments->push_back(vras);
-            }
-        }
-    }
-    return {v_score, h_score};
-}
-
-std::pair<region_t*, bool> remap_virus_reads(region_score_t& host_region_score, std::vector<read_realignment_t>& virus_read_realignments,
-        google::dense_hash_map<std::string, bam1_t*>& virus_reads_by_name, std::unordered_set<bam1_t*>& already_used) {
-    StripedSmithWaterman::Aligner aligner(1, 2, 4, 1, false);
-    StripedSmithWaterman::Filter filter;
-
-    std::vector<read_realignment_t>& host_read_realignments = host_region_score.fwd ?
-            reads_per_region[host_region_score.region->id] : reads_per_region_rc[host_region_score.region->id];
-    // remove already used read_and_score
-    host_read_realignments.erase(
-            std::remove_if(host_read_realignments.begin(), host_read_realignments.end(), [&already_used](read_realignment_t& ras) {
-                return already_used.count(ras.read);
-            }),
-            host_read_realignments.end());
-    host_region_score.reads = host_read_realignments.size();
-
-    // retrieve virus mates
-    std::vector<read_realignment_t> remapped_host_reads;
-    std::vector<bam1_t*> remapped_reads_mates;
-    std::vector<read_realignment_t> remapped_host_anchors;
-    for (read_realignment_t& rr : host_read_realignments) {
-        std::string qname = bam_get_qname(rr.read);
-        if (virus_reads_by_name.count(qname)) { // TODO: it would be useful to use successful host clips for region finding
-            remapped_host_reads.push_back(rr);
-            remapped_reads_mates.push_back(virus_reads_by_name[qname]);
-        }
-
-        if ((host_region_score.fwd && rr.is_right_clipped())
-        || (!host_region_score.fwd && rr.is_left_clipped())) {
-            remapped_host_anchors.push_back(rr);
-        }
-    }
-
-    // extract virus regions
-    std::vector<region_t*> virus_regions;
-    extract_regions(remapped_reads_mates, virus_regions);
-    virus_regions.erase(
-            std::remove_if(virus_regions.begin(), virus_regions.end(), is_host_region), virus_regions.end()
-    );
-    for (region_t* region : virus_regions) {
-        region->start = (region->start/APPROX_FACTOR) * APPROX_FACTOR;
-        region->end = (region->end/APPROX_FACTOR) * APPROX_FACTOR + APPROX_FACTOR;
-        region->end = std::min(region->end, (int) chrs[contig_id2name[region->contig_id]].second);
-    }
-
-    if (virus_regions.empty()) return {nullptr, false};
-
-    std::vector<uint64_t> read_seq_ids;
-    std::vector<read_realignment_t> host_alignments;
-    read_seq_ids.reserve(remapped_reads_mates.size()+remapped_host_anchors.size());
-    for (int i = 0; i < remapped_reads_mates.size(); i++) {
-        bam1_t* read = remapped_reads_mates[i];
-        if (!read->id) {
-            read->id = virus_read_id++;
-            std::string seq = get_sequence(read, true);
-            virus_reads_seqs.push_back(read_seq_t(read, seq));
-        }
-        read_seq_ids.push_back(read->id);
-        host_alignments.push_back(remapped_host_reads[i]);
-    }
-    for (read_realignment_t& anchor : remapped_host_anchors) {
-        if (!anchor.read->id) {
-            anchor.read->id = virus_read_id++;
-
-            std::string qname = bam_get_qname(anchor.read);
-
-            // create a "regular" mate out of the clipped portion
-            bam1_t* rc_read = bam_dup1(anchor.read);
-            if (host_region_score.fwd && anchor.is_right_clipped() && !anchor.rc) {
-                set_to_forward(rc_read);
-                rc_read->core.flag |= BAM_FREVERSE;
-            }
-            else if (!host_region_score.fwd && anchor.is_left_clipped() && anchor.rc) {
-                set_to_reverse(rc_read);
-                rc_read->core.flag &= ~BAM_FREVERSE;
-            }
-
-            std::string clip = get_sequence(rc_read, true);
-            virus_reads_seqs.push_back(read_seq_t(rc_read, clip));
-        }
-        read_seq_ids.push_back(anchor.read->id);
-        host_alignments.push_back(anchor);
-    }
-
-    region_t* best_region = NULL;
-    std::pair<int, int> best_score = {-1, -1};
-    bool is_best_vregion_fwd;
-    for (region_t* virus_region : virus_regions) {
-        std::pair<int, int> score = remap_virus_reads_supp(virus_region, false, read_seq_ids, host_region_score.region, !host_region_score.fwd,
-                host_alignments, NULL, aligner, filter);
-        std::pair<int, int> rc_score = remap_virus_reads_supp(virus_region, true, read_seq_ids, host_region_score.region, !host_region_score.fwd,
-                host_alignments, NULL, aligner, filter);
-
-        std::pair<int, int> max_score = std::max(score, rc_score);
-        if (best_score < max_score) {
-            best_score = max_score;
-            best_region = virus_region;
-            is_best_vregion_fwd = (max_score == score);
-        }
-    }
-
-    // FIXME: what if best_region is null?
-    std::cerr << "BEST VIRUS REGION: " << best_region->to_str() << " " << best_score.first << std::endl;
-    remap_virus_reads_supp(best_region, !is_best_vregion_fwd, read_seq_ids, host_region_score.region, !host_region_score.fwd,
-            host_alignments, &virus_read_realignments, aligner, filter);
-
-    std::cerr << "BEFORE " << host_region_score.to_str() << std::endl;
-    google::dense_hash_set<std::string> remapped_virus_qnames;
-    remapped_virus_qnames.set_empty_key("");
-    for (read_realignment_t& read_and_score : virus_read_realignments) {
-        remapped_virus_qnames.insert(bam_get_qname(read_and_score.read));
-    }
-    host_region_score.score = 0;
-    for (read_realignment_t& ras : host_read_realignments) {
-        if (remapped_virus_qnames.count(bam_get_qname(ras.read))) {
-            host_region_score.score += ras.score;
-        }
-    }
-    std::cerr << "AFTER " << host_region_score.to_str() << std::endl << std::endl;
-
-    return {best_region, is_best_vregion_fwd};
 }
 
 
@@ -1060,10 +874,12 @@ void dedup_reads(std::vector<bam1_t*>& host_reads, std::vector<bam1_t*>& virus_r
     std::cerr << "VIRUS READS " << virus_reads.size() << std::endl;
 }
 
-std::pair<std::vector<read_realignment_t>, std::vector<read_realignment_t> >
-        dedup_reads(std::vector<read_realignment_t>& host_read_realignments, std::vector<read_realignment_t>& virus_read_realignments) {
+google::dense_hash_set<std::string> dedup_reads(std::vector<read_realignment_t>& host_read_realignments,
+                                                std::vector<read_realignment_t> virus_read_realignments) {
     if (host_read_realignments.empty() || virus_read_realignments.empty()) {
-        return {std::vector<read_realignment_t>(), std::vector<read_realignment_t>()};
+        google::dense_hash_set<std::string> empty_set;
+        empty_set.set_empty_key("");
+        return empty_set;
     }
 
     std::unordered_map<std::string, read_realignment_t> host_reads_by_name;
@@ -1072,17 +888,17 @@ std::pair<std::vector<read_realignment_t>, std::vector<read_realignment_t> >
     }
 
     std::sort(virus_read_realignments.begin(), virus_read_realignments.end(),
-            [] (const read_realignment_t& rr1, const read_realignment_t& rr2) {
-        auto rr1_tie = std::tie(rr1.offset_start, rr1.offset_end, rr1.cigar_len);
-        auto rr2_tie = std::tie(rr2.offset_start, rr2.offset_end, rr2.cigar_len);
-        if (rr1_tie != rr2_tie) return rr1_tie < rr2_tie;
+              [] (const read_realignment_t& rr1, const read_realignment_t& rr2) {
+                  auto rr1_tie = std::tie(rr1.offset_start, rr1.offset_end, rr1.cigar_len);
+                  auto rr2_tie = std::tie(rr2.offset_start, rr2.offset_end, rr2.cigar_len);
+                  if (rr1_tie != rr2_tie) return rr1_tie < rr2_tie;
 
-        // compare cigar itself
-        for (int i = 0; i < rr1.cigar_len; i++) {
-            if (rr1.cigar[i] != rr2.cigar[i]) return rr1.cigar[i] < rr2.cigar[i];
-        }
-        return false;
-    });
+                  // compare cigar itself
+                  for (int i = 0; i < rr1.cigar_len; i++) {
+                      if (rr1.cigar[i] != rr2.cigar[i]) return rr1.cigar[i] < rr2.cigar[i];
+                  }
+                  return false;
+              });
 
     auto cigar_eq = [] (const read_realignment_t& rr1, const read_realignment_t& rr2) {
         if (rr1.cigar_len != rr2.cigar_len) return false;
@@ -1092,7 +908,8 @@ std::pair<std::vector<read_realignment_t>, std::vector<read_realignment_t> >
 
 
     int last_valid_i = 0;
-    std::vector<read_realignment_t> kept_virus_read_realignments, kept_host_read_alignments;
+    google::dense_hash_set<std::string> qnames_to_keep;
+    qnames_to_keep.set_empty_key("");
     for (int i = 1; i < virus_read_realignments.size(); i++) {
         read_realignment_t& last_valid_vrr = virus_read_realignments[last_valid_i];
         read_realignment_t& curr_vrr = virus_read_realignments[i];
@@ -1101,29 +918,214 @@ std::pair<std::vector<read_realignment_t>, std::vector<read_realignment_t> >
             read_realignment_t& last_valid_hrr = host_reads_by_name[bam_get_qname(last_valid_vrr.read)];
             read_realignment_t& curr_hrr = host_reads_by_name[bam_get_qname(curr_vrr.read)];
 
-            if (last_valid_vrr.offset_start != curr_vrr.offset_start || !cigar_eq(last_valid_vrr, curr_vrr)) { // host realignments different
-                kept_virus_read_realignments.push_back(last_valid_vrr);
+            if (last_valid_hrr.offset_start != curr_hrr.offset_start || !cigar_eq(last_valid_hrr, curr_hrr)) { // host realignments different
+                qnames_to_keep.insert(bam_get_qname(last_valid_vrr.read));
                 last_valid_i = i;
             }
         } else {
-            kept_virus_read_realignments.push_back(last_valid_vrr);
+            qnames_to_keep.insert(bam_get_qname(last_valid_vrr.read));
             last_valid_i = i;
         }
     }
+    qnames_to_keep.insert(bam_get_qname(virus_read_realignments[last_valid_i].read));
 
-    kept_virus_read_realignments.push_back(virus_read_realignments[last_valid_i]);
+    return qnames_to_keep;
+}
 
-    std::unordered_set<std::string> kept_virus_reads_qnames;
-    for (read_realignment_t& rr : kept_virus_read_realignments) {
-        kept_virus_reads_qnames.insert(bam_get_qname(rr.read));
+
+const int APPROX_FACTOR = 500;
+std::unordered_set<std::string> existing_caches;
+std::unordered_map<std::string, google::dense_hash_map<uint64_t, read_realignment_t> > cached_virus_alignments;
+
+uint64_t virus_read_id = 1;
+std::vector<read_seq_t> virus_reads_seqs;
+
+std::pair<int,int> remap_virus_reads_supp(region_t* virus_region, bool vregion_rc, std::vector<uint64_t>& read_seq_ids,
+        region_t* host_region, bool hregion_rc, std::vector<read_realignment_t>& host_alignemnts,
+        std::vector<read_realignment_t>* virus_read_realignments,
+        StripedSmithWaterman::Aligner& aligner, StripedSmithWaterman::Filter& filter) {
+
+    std::string region_str = (vregion_rc ? "-" : "+") + virus_region->to_str();
+
+    google::dense_hash_map<uint64_t, read_realignment_t>& cached_region_alignments = cached_virus_alignments[region_str];
+    if (!existing_caches.count(region_str)) {
+        cached_region_alignments.set_empty_key(0);
+        existing_caches.insert(region_str);
     }
-    for (read_realignment_t& hrr : host_read_realignments) {
-        if (kept_virus_reads_qnames.count(bam_get_qname(hrr.read))) {
-            kept_host_read_alignments.push_back(hrr);
+
+    std::vector<read_realignment_t> host_read_realignments_local, virus_read_realignments_local;
+    for (int i = 0; i < read_seq_ids.size(); i++) {
+        uint64_t read_seq_id = read_seq_ids[i];
+        if (!cached_region_alignments.count(read_seq_id)) {
+            StripedSmithWaterman::Alignment alignment;
+            read_seq_t &read_seq = virus_reads_seqs[read_seq_id];
+            std::string &read_seq_str = vregion_rc ? read_seq.seq_rc : read_seq.seq;
+            aligner.Align(read_seq_str.c_str(), chrs[contig_id2name[virus_region->contig_id]].first + virus_region->start,
+                          virus_region->len(), filter, &alignment, 0);
+
+            if (accept_alignment(alignment, read_seq_str)) {
+                std::string cigar_str = alignment_cigar_to_bam_cigar(alignment.cigar);
+                std::pair<int, const uint32_t *> cigar = cigar_str_to_array(cigar_str);
+                cached_region_alignments[read_seq_id] = read_realignment_t(read_seq.read, alignment.ref_begin, alignment.ref_end,
+                                                                         cigar.first, cigar.second, alignment.sw_score, vregion_rc);
+            } else {
+                // cache failure to align
+                cached_region_alignments[read_seq_id] = read_realignment_t(read_seq.read);
+            }
+        }
+
+        read_realignment_t& ras = cached_region_alignments[read_seq_id];
+        if (!ras.accepted()) continue;
+
+        host_read_realignments_local.push_back(host_alignemnts[i]);
+        virus_read_realignments_local.push_back(ras);
+    }
+
+
+    google::dense_hash_set<std::string> deduped_qnames = dedup_reads(host_read_realignments_local, virus_read_realignments_local);
+
+    int h_score = 0, v_score = 0;
+    std::pair<int,int> host_accept_window = get_accept_window(host_read_realignments_local, hregion_rc, host_region->len(), deduped_qnames);
+    std::pair<int,int> virus_accept_window = get_accept_window(virus_read_realignments_local, vregion_rc, virus_region->len(), deduped_qnames);
+    for (int i = 0; i < virus_read_realignments_local.size(); i++) {
+        read_realignment_t& hras = host_read_realignments_local[i];
+        read_realignment_t& vras = virus_read_realignments_local[i];
+        if (hras.offset_start >= host_accept_window.first && hras.offset_end <= host_accept_window.second
+         && vras.offset_start >= virus_accept_window.first && vras.offset_end <= virus_accept_window.second) {
+            if (deduped_qnames.count(bam_get_qname(hras.read))) {
+                h_score += hras.score;
+                v_score += vras.score;
+            }
+            if (virus_read_realignments != NULL) {
+                virus_read_realignments->push_back(vras);
+            }
+        }
+    }
+    return {v_score, h_score};
+}
+
+std::pair<region_t*, bool> remap_virus_reads(region_score_t& host_region_score, std::vector<read_realignment_t>& virus_read_realignments,
+        google::dense_hash_map<std::string, bam1_t*>& virus_reads_by_name, std::unordered_set<bam1_t*>& already_used) {
+    StripedSmithWaterman::Aligner aligner(1, 2, 4, 1, false);
+    StripedSmithWaterman::Filter filter;
+
+    std::vector<read_realignment_t>& host_read_realignments = host_region_score.fwd ?
+            reads_per_region[host_region_score.region->id] : reads_per_region_rc[host_region_score.region->id];
+    // remove already used read_and_score
+    host_read_realignments.erase(
+            std::remove_if(host_read_realignments.begin(), host_read_realignments.end(), [&already_used](read_realignment_t& ras) {
+                return already_used.count(ras.read);
+            }),
+            host_read_realignments.end());
+    host_region_score.reads = host_read_realignments.size();
+
+    // retrieve virus mates
+    std::vector<read_realignment_t> remapped_host_reads;
+    std::vector<bam1_t*> remapped_reads_mates;
+    std::vector<read_realignment_t> remapped_host_anchors;
+    for (read_realignment_t& rr : host_read_realignments) {
+        std::string qname = bam_get_qname(rr.read);
+        if (virus_reads_by_name.count(qname)) { // TODO: it would be useful to use successful host clips for region finding
+            remapped_host_reads.push_back(rr);
+            remapped_reads_mates.push_back(virus_reads_by_name[qname]);
+        }
+
+        if ((host_region_score.fwd && rr.is_right_clipped())
+        || (!host_region_score.fwd && rr.is_left_clipped())) {
+            remapped_host_anchors.push_back(rr);
         }
     }
 
-    return {kept_host_read_alignments, kept_virus_read_realignments};
+    // extract virus regions
+    std::vector<region_t*> virus_regions;
+    extract_regions(remapped_reads_mates, virus_regions);
+    virus_regions.erase(
+            std::remove_if(virus_regions.begin(), virus_regions.end(), is_host_region), virus_regions.end()
+    );
+    for (region_t* region : virus_regions) {
+        region->start = (region->start/APPROX_FACTOR) * APPROX_FACTOR;
+        region->end = (region->end/APPROX_FACTOR) * APPROX_FACTOR + APPROX_FACTOR;
+        region->end = std::min(region->end, (int) chrs[contig_id2name[region->contig_id]].second);
+    }
+
+    if (virus_regions.empty()) return {nullptr, false};
+
+    std::vector<uint64_t> read_seq_ids;
+    std::vector<read_realignment_t> host_alignments;
+    read_seq_ids.reserve(remapped_reads_mates.size()+remapped_host_anchors.size());
+    for (int i = 0; i < remapped_reads_mates.size(); i++) {
+        bam1_t* read = remapped_reads_mates[i];
+        if (!read->id) {
+            read->id = virus_read_id++;
+            std::string seq = get_sequence(read, true);
+            virus_reads_seqs.push_back(read_seq_t(read, seq));
+        }
+        read_seq_ids.push_back(read->id);
+        host_alignments.push_back(remapped_host_reads[i]);
+    }
+    for (read_realignment_t& anchor : remapped_host_anchors) {
+        if (!anchor.read->id) {
+            anchor.read->id = virus_read_id++;
+
+            std::string qname = bam_get_qname(anchor.read);
+
+            // create a "regular" mate out of the clipped portion
+            bam1_t* rc_read = bam_dup1(anchor.read);
+            if (host_region_score.fwd && anchor.is_right_clipped() && !anchor.rc) {
+                set_to_forward(rc_read);
+                rc_read->core.flag |= BAM_FREVERSE;
+            }
+            else if (!host_region_score.fwd && anchor.is_left_clipped() && anchor.rc) {
+                set_to_reverse(rc_read);
+                rc_read->core.flag &= ~BAM_FREVERSE;
+            }
+
+            std::string clip = get_sequence(rc_read, true);
+            virus_reads_seqs.push_back(read_seq_t(rc_read, clip));
+        }
+        read_seq_ids.push_back(anchor.read->id);
+        host_alignments.push_back(anchor);
+    }
+
+    region_t* best_region = NULL;
+    std::pair<int, int> best_score = {-1, -1};
+    bool is_best_vregion_fwd;
+    for (region_t* virus_region : virus_regions) {
+        std::pair<int, int> score = remap_virus_reads_supp(virus_region, false, read_seq_ids, host_region_score.region, !host_region_score.fwd,
+                host_alignments, NULL, aligner, filter);
+        std::pair<int, int> rc_score = remap_virus_reads_supp(virus_region, true, read_seq_ids, host_region_score.region, !host_region_score.fwd,
+                host_alignments, NULL, aligner, filter);
+
+        std::pair<int, int> max_score = std::max(score, rc_score);
+        if (best_score < max_score) {
+            best_score = max_score;
+            best_region = virus_region;
+            is_best_vregion_fwd = (max_score == score);
+        }
+    }
+
+    // FIXME: what if best_region is null?
+    std::cerr << "BEST VIRUS REGION: " << best_region->to_str() << " " << best_score.first << std::endl;
+    remap_virus_reads_supp(best_region, !is_best_vregion_fwd, read_seq_ids, host_region_score.region, !host_region_score.fwd,
+            host_alignments, &virus_read_realignments, aligner, filter);
+
+    google::dense_hash_set<std::string> deduped_reads = dedup_reads(host_alignments, virus_read_realignments);
+
+    std::cerr << "BEFORE " << host_region_score.to_str() << std::endl;
+    google::dense_hash_set<std::string> remapped_virus_qnames;
+    remapped_virus_qnames.set_empty_key("");
+    for (read_realignment_t& rr : virus_read_realignments) {
+        remapped_virus_qnames.insert(bam_get_qname(rr.read));
+    }
+    host_region_score.score = 0;
+    for (read_realignment_t& rr : host_read_realignments) {
+        if (remapped_virus_qnames.count(bam_get_qname(rr.read)) && deduped_reads.count(bam_get_qname(rr.read))) {
+            host_region_score.score += rr.score;
+        }
+    }
+    std::cerr << "AFTER " << host_region_score.to_str() << std::endl << std::endl;
+
+    return {best_region, is_best_vregion_fwd};
 }
 
 
@@ -1141,6 +1143,10 @@ int main(int argc, char* argv[]) {
     std::string virus_reference_fname  = argv[2];
     std::string workdir = argv[3];
     std::string workspace = argv[4];
+    int forced_region_score_id = -1;
+    if (argc > 5) {
+        forced_region_score_id = std::stoi(argv[5]);
+    }
 
     std::ifstream contig_map_fin(workdir + "/contig_map");
     std::string contig_name; int contig_id;
@@ -1492,10 +1498,12 @@ int main(int argc, char* argv[]) {
 
         std::vector<read_realignment_t> virus_read_realignments;
         std::pair<region_t*, bool> best_virus_region;
+        google::dense_hash_set<std::string> dedup_qnames;
         while (!region_scores.empty()) {
             region_score_t best_region_score = region_scores.top();
             region_scores.pop();
 
+            if (forced_region_score_id >= 0 && best_region_score.id != forced_region_score_id) continue;
             std::cerr << "CURRENT TOP REGION: " << best_region_score.to_str() << std::endl;
 
             // remap virus reads and find best virus regions
@@ -1508,19 +1516,22 @@ int main(int argc, char* argv[]) {
             if (best_region_score.id == region_scores.top().id) {
                 region_t* best_region = best_region_score.region;
                 bool host_region_fwd = best_region_score.fwd;
-//                region_scores.pop();
+                region_scores.pop();
 
-//                std::vector<read_realignment_t>& host_read_realignments = host_region_fwd ?
-//                        reads_per_region[best_region->id] : reads_per_region_rc[best_region->id];
-//                auto dedup_realignments = dedup_reads(host_read_realignments, virus_read_realignments);
+                std::vector<read_realignment_t>& host_read_realignments = host_region_fwd ?
+                        reads_per_region[best_region->id] : reads_per_region_rc[best_region->id];
+                dedup_qnames = dedup_reads(host_read_realignments, virus_read_realignments);
 
-//                best_region_score.reads = host_read_realignments.size();
-//                best_region_score.score = 0;
-//                for (read_realignment_t& rr : host_read_realignments) {
-//                    best_region_score.score += rr.score;
-//                }
-//
-//                region_scores.push(best_region_score);
+                best_region_score.reads = 0;
+                best_region_score.score = 0;
+                for (read_realignment_t& rr : host_read_realignments) {
+                    if (dedup_qnames.count(bam_get_qname(rr.read))) {
+                        best_region_score.reads++;
+                        best_region_score.score += rr.score;
+                    }
+                }
+
+                region_scores.push(best_region_score);
                 if (best_region_score.id == region_scores.top().id) {
                     std::cerr << "CONFIRMED TOP REGION: " << best_region_score.to_str() << std::endl;
                     break;
@@ -1530,9 +1541,10 @@ int main(int argc, char* argv[]) {
 
         if (region_scores.empty()) break;
 
-        region_t* best_region = region_scores.top().region;
-        bool host_region_fwd = region_scores.top().fwd;
-        if (region_scores.top().score == 0) {
+        region_score_t best_region_score = region_scores.top();
+        region_t* best_region = best_region_score.region;
+        bool host_region_fwd = best_region_score.fwd;
+        if (best_region_score.score == 0) {
             std::cerr << "REMAINING REGIONS HAVE SCORE 0" << std::endl;
             break;
         }
@@ -1541,8 +1553,8 @@ int main(int argc, char* argv[]) {
         // remove host reads s.t. the virus read was not remapped to best virus region
         std::vector<read_realignment_t>& host_read_realignments = host_region_fwd ? reads_per_region[best_region->id] : reads_per_region_rc[best_region->id];
         std::unordered_set<std::string> remapped_virus_qnames;
-        for (read_realignment_t& read_and_score : virus_read_realignments) {
-            remapped_virus_qnames.insert(bam_get_qname(read_and_score.read));
+        for (read_realignment_t& rr : virus_read_realignments) {
+            remapped_virus_qnames.insert(bam_get_qname(rr.read));
         }
         host_read_realignments.erase(
                 std::remove_if(host_read_realignments.begin(), host_read_realignments.end(), [&remapped_virus_qnames](read_realignment_t& ras) {
@@ -1550,47 +1562,51 @@ int main(int argc, char* argv[]) {
                 }),
                 host_read_realignments.end());
 
+        for (read_realignment_t& rr : host_read_realignments) {
+            already_used.insert(rr.read);
+        }
 
         std::cerr << "HOST READS: " << host_read_realignments.size() << std::endl;
+
 
         samFile* writer = open_bam_writer(workspace+"/readsx", std::to_string(virus_integration_id)+".bam", host_and_virus_file->header);
 
         // edit virus reads and find host bp
         edit_remapped_reads(best_virus_region.first, virus_read_realignments, !best_virus_region.second);
-        for (read_realignment_t& ras : virus_read_realignments) {
-            int ok = sam_write1(writer, host_and_virus_file->header, ras.read);
-            if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
+        for (read_realignment_t& rr : virus_read_realignments) {
+            if (dedup_qnames.count(bam_get_qname(rr.read))) {
+                int ok = sam_write1(writer, host_and_virus_file->header, rr.read);
+                if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
+            }
         }
         int v_min_pos = INT32_MAX, v_max_pos = 0;
-        for (read_realignment_t& ras : virus_read_realignments) {
-            v_min_pos = std::min(v_min_pos, ras.read->core.pos);
-            v_max_pos = std::max(v_max_pos, bam_endpos(ras.read));
+        for (read_realignment_t& rr : virus_read_realignments) {
+            v_min_pos = std::min(v_min_pos, rr.read->core.pos);
+            v_max_pos = std::max(v_max_pos, bam_endpos(rr.read));
         }
         int_breakpoint_t virus_bp(best_virus_region.first->contig_id, v_min_pos, v_max_pos, best_virus_region.second);
 
         // edit host reads and find host bp
         edit_remapped_reads(best_region, host_read_realignments, !host_region_fwd);
-        for (read_realignment_t& read_and_score : host_read_realignments) {
-            int ok = sam_write1(writer, host_and_virus_file->header, read_and_score.read);
-            if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
+        for (read_realignment_t& rr : host_read_realignments) {
+            if (dedup_qnames.count(bam_get_qname(rr.read))) {
+                int ok = sam_write1(writer, host_and_virus_file->header, rr.read);
+                if (ok < 0) throw "Failed to write to " + std::string(writer->fn);
+            }
         }
         int score = 0, h_min_pos = INT32_MAX, h_max_pos = 0;
-        for (read_realignment_t& ras : host_read_realignments) {
-            h_min_pos = std::min(h_min_pos, ras.read->core.pos);
-            h_max_pos = std::max(h_max_pos, bam_endpos(ras.read));
-            score += ras.score;
+        for (read_realignment_t& rr : host_read_realignments) {
+            h_min_pos = std::min(h_min_pos, rr.read->core.pos);
+            h_max_pos = std::max(h_max_pos, bam_endpos(rr.read));
+            score += rr.score;
         }
         int_breakpoint_t host_bp(best_region->contig_id, h_min_pos, h_max_pos, host_region_fwd);
 
         sam_close(writer);
 
         virus_integration_t v_int(best_region->contig_id, host_bp, virus_bp,
-                                  host_read_realignments.size(), score);
+                                  best_region_score.reads, best_region_score.score);
         std::cout << v_int.to_str() << std::endl;
-
-        for (read_realignment_t read_and_score : host_read_realignments) {
-            already_used.insert(read_and_score.read);
-        }
 
         std::cerr << "INTEGRATION ID: " << v_int.id << std::endl;
         std::cerr << "ALREADY USED: " << already_used.size() << std::endl << std::endl;

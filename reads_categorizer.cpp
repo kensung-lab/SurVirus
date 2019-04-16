@@ -88,7 +88,7 @@ void categorize(int id, std::string contig, std::string bam_fname, int target_le
         bool to_be_written = false;
 
         // clipped read
-        if (is_clipped(read) && get_clip_len(read) >= config.min_sv_len) {
+        if (is_clipped(read) && get_clip_len(read) >= config.min_sc_size) {
             mtx.lock();
             anchor_reads->push_back(read);
             mtx.unlock();
