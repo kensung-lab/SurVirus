@@ -190,6 +190,27 @@ for file_index, bam_file in enumerate(bam_files):
     print "Executing:", samtools_sort_cmd
     os.system(samtools_sort_cmd)
 
+    extract_clips_cmd = "./extract_clips %s %s %s" % (cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
+    print "Executing:", extract_clips_cmd
+    os.system(extract_clips_cmd)
+
+    bwa_cmd = "%s mem -t %d %s %s/virus-clips.fa | %s view -b -F 2308 > %s/virus-clips.bam" \
+              % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
+                 cmd_args.samtools, bam_workspace)
+    print "Executing:", bwa_cmd
+    os.system(bwa_cmd)
+
+    bwa_cmd = "%s mem -t %d -h %d %s %s/host-clips.fa | %s view -b -F 2308 > %s/host-clips.bam" \
+              % (cmd_args.bwa, cmd_args.threads, n_viruses, cmd_args.host_and_virus_reference, bam_workspace,
+                 cmd_args.samtools, bam_workspace)
+    print "Executing:", bwa_cmd
+    os.system(bwa_cmd)
+
+    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-clips.sorted.bam" % bam_workspace,
+               "%s/host-clips.bam" % bam_workspace)
+    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-clips.sorted.bam" % bam_workspace,
+               "%s/virus-clips.bam" % bam_workspace)
+
     read_categorizer_cmd = "./reads_categorizer %s %s %s" % (cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
     print "Executing:", read_categorizer_cmd
     os.system(read_categorizer_cmd)
@@ -206,37 +227,21 @@ for file_index, bam_file in enumerate(bam_files):
     print "Executing:", bwa_cmd
     os.system(bwa_cmd)
 
-    bwa_cmd = "%s mem -t %d %s %s/virus-clips.fa | %s view -b -F 2308 > %s/virus-clips.bam" \
-              % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
-                 cmd_args.samtools, bam_workspace)
-    print "Executing:", bwa_cmd
-    os.system(bwa_cmd)
-
-    bwa_cmd = "%s mem -t %d -h %d %s %s/host-clips.fa | %s view -b -F 2308 > %s/host-clips.bam" \
-              % (cmd_args.bwa, cmd_args.threads, n_viruses, cmd_args.host_and_virus_reference, bam_workspace,
-                 cmd_args.samtools, bam_workspace)
-    print "Executing:", bwa_cmd
-    os.system(bwa_cmd)
-
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-side.sorted.bam" % bam_workspace,
                "%s/host-side.bam" % bam_workspace)
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-side.sorted.bam" % bam_workspace,
                "%s/virus-side.bam" % bam_workspace)
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-anchors.sorted.bam" % bam_workspace,
-               "%s/host-anchors.bam" % bam_workspace)
+             "%s/host-anchors.bam" % bam_workspace)
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-anchors.sorted.bam" % bam_workspace,
                "%s/virus-anchors.bam" % bam_workspace)
-    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-clips.sorted.bam" % bam_workspace,
-               "%s/host-clips.bam" % bam_workspace)
-    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-clips.sorted.bam" % bam_workspace,
-               "%s/virus-clips.bam" % bam_workspace)
 
     readsx = bam_workspace + "/readsx"
     if not os.path.exists(readsx):
         os.makedirs(readsx)
 
-    remapper_cmd = "./remapper %s %s %s %s > %s/results.txt 2> %s/log.txt" \
-                   % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, bam_workspace, bam_workspace, \
-                      cmd_args.workdir)
+    remapper_cmd = "./remapper %s %s %s %s %s > %s/results.txt 2> %s/log.txt" \
+                   % (bam_file.filename, cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir,
+                      bam_workspace, bam_workspace, cmd_args.workdir)
     print "Executing:", remapper_cmd
     os.system(remapper_cmd)
