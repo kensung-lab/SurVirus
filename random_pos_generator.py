@@ -14,4 +14,4 @@ class RandomPositionGenerator:
                 chr = k
                 break
             r -= stop-start
-        return (chr, r)
+        return (chr, r+start)

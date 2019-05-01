@@ -4,7 +4,7 @@ from random_pos_generator import RandomPositionGenerator
 import numpy as np
 
 MAX_READS = 1000
-GEN_DIST_SIZE = 100000
+GEN_DIST_SIZE = 10000
 MAX_ACCEPTABLE_IS = 20000
 
 cmd_parser = argparse.ArgumentParser(description='SurVirus, a virus integration caller.')
@@ -100,10 +100,6 @@ for i in range(1,GEN_DIST_SIZE*2):
     if i % 100000 == 0: print i, "random positions generated."
     random_positions.append(rand_pos_gen.next())
 
-with open("%s/random_pos.txt" % cmd_args.workdir, "w") as random_pos_file:
-    for random_pos in random_positions:
-        random_pos_file.write("%s %d\n" % random_pos)
-
 for file_index, bam_file in enumerate(bam_files):
     read_len = 0
     for i, read in enumerate(bam_file.fetch(until_eof=True)):
@@ -114,23 +110,28 @@ for file_index, bam_file in enumerate(bam_files):
     avg_depth = 0
     samplings = 0
     rnd_i = 0
-    while len(general_dist) < GEN_DIST_SIZE:
-        chr, pos = random_positions[rnd_i]
-        rnd_i += 1
+    for e in random_positions:
+        if len(general_dist) > GEN_DIST_SIZE: break
 
-        # if pos > len(reference_fa[chr])-10000:
-        #     continue
+        print len(general_dist)
+
+        chr, pos = e
+        rnd_i += 1
 
         samplings += 1
         i = 0
+        used = set()
         for read in bam_file.fetch(contig=chr, start=pos, end=pos+10000):
             if read.reference_start < pos:
                 avg_depth += 1
+            if (read.reference_start, read.next_reference_start) in used: continue # try not to use duplicates
+
             if read.is_proper_pair and not read.is_secondary and not read.is_supplementary and \
             0 < read.template_length < MAX_ACCEPTABLE_IS and 'S' not in read.cigarstring and 'S' not in read.get_tag('MC'):
                 if i > 100: break
                 i += 1
                 general_dist.append(read.template_length)
+                used.add((read.reference_start, read.next_reference_start))
 
     mean_is = np.mean(general_dist)
     stddev_is = np.std(general_dist)
@@ -157,6 +158,20 @@ for file_index, bam_file in enumerate(bam_files):
         stat_file.write("avg_is %d\n" % mean_is)
         stat_file.write("max_is %d\n" % max_is)
         stat_file.write("read_len %d\n" % read_len)
+
+
+# rand_pos_gen = RandomPositionGenerator([(r[0], r[1]+max_is, r[2]-max_is) for r in sampling_regions if r[2]-r[1] > 2*max_is])
+
+print "Regenerating random genomic positions..."
+random_positions = []
+for i in range(1,GEN_DIST_SIZE*2):
+    if i % 100000 == 0: print i, "random positions generated."
+    random_positions.append(rand_pos_gen.next())
+
+with open("%s/random_pos.txt" % cmd_args.workdir, "w") as random_pos_file:
+    for random_pos in random_positions:
+        random_pos_file.write("%s %d\n" % random_pos)
+
 
 for file_index, bam_file in enumerate(bam_files):
     bam_workspace = "%s/bam_%d/" % (cmd_args.workdir, file_index)
@@ -194,17 +209,31 @@ for file_index, bam_file in enumerate(bam_files):
     print "Executing:", extract_clips_cmd
     os.system(extract_clips_cmd)
 
-    bwa_cmd = "%s mem -t %d %s %s/virus-clips.fa | %s view -b -F 2308 > %s/virus-clips.bam" \
-              % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
-                 cmd_args.samtools, bam_workspace)
-    print "Executing:", bwa_cmd
-    os.system(bwa_cmd)
+    bwa_aln_cmd = "%s aln -t %d %s %s/virus-clips.fa -f %s/virus-clips.sai" \
+                  % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace)
+    bwa_samse_cmd = "%s samse %s %s/virus-clips.sai %s/virus-clips.fa | %s view -b -F 2308 > %s/virus-clips.bam" \
+                    % (cmd_args.bwa, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace, cmd_args.samtools, bam_workspace)
 
-    bwa_cmd = "%s mem -t %d -h %d %s %s/host-clips.fa | %s view -b -F 2308 > %s/host-clips.bam" \
-              % (cmd_args.bwa, cmd_args.threads, n_viruses, cmd_args.host_and_virus_reference, bam_workspace,
-                 cmd_args.samtools, bam_workspace)
-    print "Executing:", bwa_cmd
-    os.system(bwa_cmd)
+    # bwa_cmd = "%s mem -t %d %s %s/virus-clips.fa | %s view -b -F 2308 > %s/virus-clips.bam" \
+    #           % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
+    #              cmd_args.samtools, bam_workspace)
+    print "Executing:", bwa_aln_cmd
+    os.system(bwa_aln_cmd)
+    print "Executing:", bwa_samse_cmd
+    os.system(bwa_samse_cmd)
+
+    bwa_aln_cmd = "%s aln -t %d %s %s/host-clips.fa -f %s/host-clips.sai" \
+                  % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace)
+    bwa_samse_cmd = "%s samse %s %s/host-clips.sai %s/host-clips.fa | %s view -b -F 2308 > %s/host-clips.bam" \
+                    % (cmd_args.bwa, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace, cmd_args.samtools,
+                       bam_workspace)
+    # bwa_cmd = "%s mem -t %d -h %d %s %s/host-clips.fa | %s view -b -F 2308 > %s/host-clips.bam" \
+    #           % (cmd_args.bwa, cmd_args.threads, n_viruses, cmd_args.host_and_virus_reference, bam_workspace,
+    #              cmd_args.samtools, bam_workspace)
+    print "Executing:", bwa_aln_cmd
+    os.system(bwa_aln_cmd)
+    print "Executing:", bwa_samse_cmd
+    os.system(bwa_samse_cmd)
 
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-clips.sorted.bam" % bam_workspace,
                "%s/host-clips.bam" % bam_workspace)
