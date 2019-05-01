@@ -782,47 +782,28 @@ void dedup_reads(std::vector<bam1_t*>& host_reads, std::vector<bam1_t*>& virus_r
     // DEDUP BY SEQUENCE
 
     // dedup pairs
-    google::dense_hash_map<std::string, std::vector<std::pair<bam1_t*, bam1_t*> > > pairs_by_seq;
+    google::dense_hash_map<std::string, std::vector<std::string> > pairs_by_seq;
     pairs_by_seq.set_empty_key("");
     for (bam1_t* hread : host_reads) {
-        if (virus_reads_by_name.count(bam_get_qname(hread))) {
+        if (!(hread->core.flag & BAM_FSECONDARY) && virus_reads_by_name.count(bam_get_qname(hread))) {
             bam1_t* vread = virus_reads_by_name[bam_get_qname(hread)];
             std::string joint_string = get_sequence(hread, true) + "-" + get_sequence(vread, true);
-            pairs_by_seq[joint_string].push_back({hread, vread});
+            pairs_by_seq[joint_string].push_back(bam_get_qname(hread));
         }
     }
     for (auto& e : pairs_by_seq) {
-        std::sort(e.second.begin(), e.second.end(), [](const std::pair<bam1_t*, bam1_t*> p1, const std::pair<bam1_t*, bam1_t*> p2) {
-            return strcmp(bam_get_qname(p1.first), bam_get_qname(p2.first)) < 0;
-        });
+        std::sort(e.second.begin(), e.second.end());
     }
 
-    // dedup host/virus anchors
-    google::dense_hash_map<std::string, std::vector<bam1_t*> > host_anchors_by_seq;
-    host_anchors_by_seq.set_empty_key("");
-    for (bam1_t* hread : host_reads) {
-        if (!virus_reads_by_name.count(bam_get_qname(hread))) {
-            std::string seq = get_sequence(hread, true);
-            host_anchors_by_seq[seq].push_back(hread);
-        }
-    }
-    for (auto& e : host_anchors_by_seq) {
-        std::sort(e.second.begin(), e.second.end(), [](const bam1_t* r1, const bam1_t* r2) {
-            return strcmp(bam_get_qname(r1), bam_get_qname(r2)) < 0;
-        });
-    }
-
-    // clear reads and insert only one for sequence
-    host_reads.clear();
-    virus_reads.clear();
+    google::dense_hash_set<std::string> deduped_qnames;
+    deduped_qnames.set_empty_key("");
     for (auto& e : pairs_by_seq) {
-        host_reads.push_back(e.second[0].first);
-        virus_reads.push_back(e.second[0].second);
-    }
-    for (auto& e : host_anchors_by_seq) {
-        host_reads.push_back(e.second[0]);
+        deduped_qnames.insert(e.second[0]);
     }
 
+    auto qname_not_in_deduped = [&deduped_qnames] (const bam1_t* r) { return !deduped_qnames.count(bam_get_qname(r)); };
+    host_reads.erase(std::remove_if(host_reads.begin(), host_reads.end(), qname_not_in_deduped), host_reads.end());
+    virus_reads.erase(std::remove_if(virus_reads.begin(), virus_reads.end(), qname_not_in_deduped), virus_reads.end());
 
     std::cerr << "AFTER DEDUP BY SEQ" << std::endl;
     std::cerr << "HOST READS " << host_reads.size() << std::endl;
@@ -831,15 +812,14 @@ void dedup_reads(std::vector<bam1_t*>& host_reads, std::vector<bam1_t*>& virus_r
 
     // DEDUP BY POSITION AND CIGAR
 
+    deduped_qnames.clear();
+
     // dedup pairs
     std::vector<std::pair<bam1_t*, bam1_t*> > paired_reads;
-    std::vector<bam1_t*> host_anchors;
     for (bam1_t* hread : host_reads) {
         if (virus_reads_by_name.count(bam_get_qname(hread))) {
             bam1_t* vread = virus_reads_by_name[bam_get_qname(hread)];
             paired_reads.push_back({hread, vread});
-        } else {
-            host_anchors.push_back(hread);
         }
     }
 
@@ -854,9 +834,6 @@ void dedup_reads(std::vector<bam1_t*>& host_reads, std::vector<bam1_t*>& virus_r
     };
     std::sort(paired_reads.begin(), paired_reads.end(), pair_cmp);
 
-    host_reads.clear();
-    virus_reads.clear();
-
     int last_valid_i = 0;
     for (int i = 1; i < paired_reads.size(); i++) {
         bam1_t* h1 = paired_reads[last_valid_i].first,  * h2 = paired_reads[i].first;
@@ -869,16 +846,18 @@ void dedup_reads(std::vector<bam1_t*>& host_reads, std::vector<bam1_t*>& virus_r
             // keep last_valid_i
             std::string last_valid_seq = get_sequence(h1, true) + "-" + get_sequence(v1, true);
             std::string curr_seq = get_sequence(h2, true) + "-" + get_sequence(v2, true);
-            std::vector<std::pair<bam1_t*, bam1_t*> >& pairs_by_curr_seq = pairs_by_seq[curr_seq];
-            std::vector<std::pair<bam1_t*, bam1_t*> >& pairs_by_last_valid_seq = pairs_by_seq[last_valid_seq];
+            std::vector<std::string>& pairs_by_curr_seq = pairs_by_seq[curr_seq];
+            std::vector<std::string>& pairs_by_last_valid_seq = pairs_by_seq[last_valid_seq];
             pairs_by_last_valid_seq.insert(pairs_by_last_valid_seq.end(), pairs_by_curr_seq.begin(), pairs_by_curr_seq.end());
         } else {
-            host_reads.push_back(h1);
-            virus_reads.push_back(v1);
+            deduped_qnames.insert(bam_get_qname(h1));
             last_valid_i = i;
         }
     }
-    host_reads.insert(host_reads.end(), host_anchors.begin(), host_anchors.end());
+    deduped_qnames.insert(bam_get_qname(paired_reads[last_valid_i].first));
+
+    host_reads.erase(std::remove_if(host_reads.begin(), host_reads.end(), qname_not_in_deduped), host_reads.end());
+    virus_reads.erase(std::remove_if(virus_reads.begin(), virus_reads.end(), qname_not_in_deduped), virus_reads.end());
 
     std::cerr << "AFTER DEDUP BY POS" << std::endl;
     std::cerr << "HOST READS " << host_reads.size() << std::endl;
@@ -895,6 +874,7 @@ google::dense_hash_set<std::string> dedup_reads(std::vector<read_realignment_t>&
 
     std::unordered_map<std::string, read_realignment_t> host_reads_by_name;
     for (read_realignment_t& rr : host_read_realignments) {
+        if (rr.read->core.flag & BAM_FSECONDARY) continue;
         host_reads_by_name[bam_get_qname(rr.read)] = rr;
     }
 
@@ -1051,7 +1031,6 @@ std::pair<region_t*, bool> remap_virus_reads(region_score_t& host_region_score, 
     std::vector<read_realignment_t> remapped_host_anchors;
     for (read_realignment_t& rr : host_read_realignments) {
         std::string qname = bam_get_qname(rr.read);
-
         // we call good clipped read a read where the anchor maps to host and the clip to virus, or viceversa
         // when this happens, we often create two copies of the read, one in host and one in anchor
         // because of this, there are often two reads in host: an unclipped one, and a good anchor (or its copy)
@@ -1173,34 +1152,37 @@ struct pair_hash
         return h1 ^ h2;
     }
 };
-std::vector<double> gen_population_for_ins(std::string bam_fname, std::string workdir) {
+std::vector<bam1_t*> gen_population_for_ins(std::string bam_fname, std::string workdir) {
     open_samFile_t* open_sam = open_samFile(bam_fname.c_str());
 
     std::ifstream rnd_pos_fin(workdir + "/random_pos.txt");
-    std::vector<double> population;
+    std::vector<bam1_t*> population;
     bam1_t* read = bam_init1();
-    while (population.size() < POP_SIZE) {
-        char contig[1000]; int pos;
-        rnd_pos_fin >> contig >> pos;
+    char contig[1000]; int pos;
+    while (rnd_pos_fin >> contig >> pos) {
+        if (population.size() > POP_SIZE) break;
 
         std::unordered_set<std::pair<int, int>, pair_hash> used_pairs;
 
         char region[1000];
-        sprintf(region, "%s:%d-%d", contig, pos-2*stats.max_is, pos);
+        sprintf(region, "%s:%d-%d", contig, pos-stats.max_is, pos);
         hts_itr_t* iter = sam_itr_querys(open_sam->idx, open_sam->header, region);
         while (sam_itr_next(open_sam->file, iter, read) >= 0) {
             if (!is_valid(read, false) || bam_is_rev(read)) continue;
+            int mendpos = get_mate_endpos(read);
+            if (read->core.pos < pos-stats.max_is || mendpos > pos+stats.max_is) continue;
 
-            if (is_inward(read, stats.min_is) && read->core.isize > 0 && read->core.isize >= stats.min_is
-            && read->core.isize <= 2*stats.max_is) {
-                if (used_pairs.count({read->core.pos, read->core.mpos})) continue; // we already sampled a duplicate pair
+            if (!bam_is_rev(read) && bam_is_mrev(read) && read->core.isize > 0 && read->core.isize >= stats.min_is
+                && read->core.isize <= 2*stats.max_is) {
 
-                int start = read->core.pos+read->core.l_qseq/2, end = get_mate_endpos(read)-read->core.l_qseq/2;
+                if (used_pairs.count({read->core.pos, mendpos})) continue; // we already sampled a duplicate pair
+
+                int start = read->core.pos+30, end = mendpos-30;
                 if (start >= end) continue;
 
                 if (start <= pos && pos <= end) {
-                    used_pairs.insert({read->core.pos, read->core.mpos});
-                    population.push_back((double) read->core.isize);
+                    used_pairs.insert({read->core.pos, mendpos});
+                    population.push_back(bam_dup1(read));
                 }
             }
         }
@@ -1220,6 +1202,7 @@ google::dense_hash_map<std::string, int> get_distances(std::vector<read_realignm
     google::dense_hash_map<std::string, int> dists;
     dists.set_empty_key("");
     for (read_realignment_t& rr : realignments) {
+        if (rr.read->core.flag & BAM_FSECONDARY) continue;
         std::string qname = bam_get_qname(rr.read);
         int dist = dist_from_bp(rr, bp);
         if (!dists.count(qname) || dists[qname] < dist) {
@@ -1304,6 +1287,25 @@ int main(int argc, char* argv[]) {
         contig_tid2id[i] = contig_id;
     }
 
+    {
+//        std::ofstream pop_outf(workdir + "/population.txt");
+//        samFile* pop_writer = open_bam_writer(workspace, "population.bam", host_and_virus_file->header);
+//        std::vector<bam1_t*> population = gen_population_for_ins(bam_fname, workdir);
+//        std::vector<double> isizes;
+//        for (bam1_t* r : population) {
+//            pop_outf << r->core.isize << std::endl;
+//            isizes.push_back(r->core.isize);
+//            sam_write1(pop_writer, host_and_virus_file->header, r);
+//        }
+//        pop_outf.close();
+//        sam_close(pop_writer);
+//
+//        alglib::real_1d_array pop_v;
+//        pop_v.setcontent(isizes.size(), isizes.data());
+//        std::cerr << "POPULATION MEAN: " << mean(isizes) << std::endl;
+//        exit(0);
+    }
+
 
     /* === READ CHIMERIC PAIRS/READS === */
 
@@ -1381,12 +1383,15 @@ int main(int argc, char* argv[]) {
             char r1_dir = bam_aux2A(bam_aux_get(r1, "CD")), r2_dir = bam_aux2A(bam_aux_get(r2, "CD"));
 
             // r1 will be the host read, r2 the virus read and the secondary host read
+            auto point_twd_bp = [] (bam1_t* r, char dir) {
+                return (bam_is_rev(r) && dir == 'L') || (!bam_is_rev(r) && dir == 'R');
+            };
 
             if (r1_is_host != r2_is_host) {
                 // if one is from host and one from virus, then it's easy
                 host_reads.push_back(r1);
                 virus_reads.push_back(r2);
-                if ((bam_is_rev(r2) && r2_dir == 'L') || (!bam_is_rev(r2) && r2_dir == 'R')) {
+                if (point_twd_bp(r2, r2_dir)) {
                     // virus read is pointing towards bp, so it must be rc in human
                     bam1_t* rc_copy = rc_read(bam_dup1(r2));
                     rc_copy->core.flag |= BAM_FSECONDARY;
@@ -1398,35 +1403,32 @@ int main(int argc, char* argv[]) {
                     host_reads.push_back(copy);
                 }
             } else if (r1_is_host) { // both reads on host
-                host_reads.push_back(r1);
-                bam1_t* r2_copy = bam_dup1(r2);
-                r2_copy->core.flag |= BAM_FSECONDARY;
-                host_reads.push_back(r2);
-
-                r2_copy = bam_dup1(r2);
-                if ((bam_is_rev(r2) && r2_dir == 'L') || (!bam_is_rev(r2) && r2_dir == 'R')) {
-                    // r2 is pointing towards bp, so it must be rc in virus
-                    rc_read(r2_copy);
-                }
-                virus_reads.push_back(r2_copy);
-            } else { // both reads on virus
-                if ((bam_is_rev(r1) && r1_dir == 'L') || (!bam_is_rev(r1) && r1_dir == 'R')) {
-                    // r2 is pointing towards bp, so it must be rc in virus
-                    rc_read(r1);
+                if (!point_twd_bp(r1, r1_dir)) {
+                    std::swap(r1, r2);
                 }
                 host_reads.push_back(r1);
-
                 virus_reads.push_back(r2);
+
                 bam1_t* r2_copy = bam_dup1(r2);
-                if ((bam_is_rev(r2) && r2_dir == 'L') || (!bam_is_rev(r2) && r2_dir == 'R')) {
-                    // r2 is pointing towards bp, so it must be rc in virus
-                    rc_read(r2_copy);
+                rc_read(r2_copy);
+                r2_copy->core.flag |= BAM_FSECONDARY;
+                host_reads.push_back(r2_copy);
+            } else { // both reads on virus
+                // r1 must be the mate pointing away from bp
+                if (point_twd_bp(r1, r1_dir)) {
+                    std::swap(r1, r2);
                 }
+                host_reads.push_back(r1);
+                virus_reads.push_back(r2);
+
+                bam1_t* r2_copy = bam_dup1(r2);
+                rc_read(r2_copy);
                 r2_copy->core.flag |= BAM_FSECONDARY;
                 host_reads.push_back(r2_copy);
             }
         }
     }
+
 
     google::dense_hash_map<std::string, bam1_t*> virus_reads_by_name;
     virus_reads_by_name.set_empty_key("");
@@ -1489,7 +1491,6 @@ int main(int argc, char* argv[]) {
     std::cerr << "HOST REGIONS: " << host_regions.size() << std::endl;
 
     /* ====== */
-
 
 
     /* === COMPUTE READS-REGIONS ALIGNMENTS === */
@@ -1630,18 +1631,24 @@ int main(int argc, char* argv[]) {
     }
 
 
-    /* === GENERATE POPULATION FOR KS-TEST === */
+    /* === GENERATE POPULATION FOR STAT TEST === */
 
     std::ofstream pop_outf(workdir + "/population.txt");
-    std::vector<double> population = gen_population_for_ins(bam_fname, workdir);
-    for (double d : population) {
-        pop_outf << d << std::endl;
+    samFile* pop_writer = open_bam_writer(workspace, "population.bam", host_and_virus_file->header);
+    std::vector<bam1_t*> population = gen_population_for_ins(bam_fname, workdir);
+    std::cerr << "POPULATION SIZE: " << population.size() << std::endl;
+    std::vector<double> isizes;
+    for (bam1_t* r : population) {
+        pop_outf << r->core.isize << std::endl;
+        isizes.push_back(r->core.isize);
+        sam_write1(pop_writer, host_and_virus_file->header, r);
     }
     pop_outf.close();
+    sam_close(pop_writer);
 
     alglib::real_1d_array pop_v;
-    pop_v.setcontent(population.size(), population.data());
-    std::cerr << "POPULATION MEAN: " << mean(population) << std::endl;
+    pop_v.setcontent(isizes.size(), isizes.data());
+    std::cerr << "POPULATION MEAN: " << mean(isizes) << std::endl;
 
     /* ==== */
 
@@ -1728,7 +1735,6 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-
         // remove host reads s.t. the virus read was not remapped to best virus region
         std::vector<read_realignment_t>& host_read_realignments = host_region_fwd ? reads_per_region[best_region->id] : reads_per_region_rc[best_region->id];
         std::unordered_set<std::string> remapped_virus_qnames;
@@ -1746,7 +1752,6 @@ int main(int argc, char* argv[]) {
         }
 
         std::cerr << "HOST READS: " << host_read_realignments.size() << std::endl;
-
 
         samFile* writer = open_bam_writer(workspace+"/readsx", std::to_string(virus_integration_id)+".bam", host_and_virus_file->header);
 
@@ -1811,20 +1816,11 @@ int main(int argc, char* argv[]) {
 
         double p_value = -1.0;
         if (sample.size() >= 5) {
-//            if (sample.size() > 100) {
-//                std::random_shuffle(sample.begin(), sample.end());
-//                sample.resize(100);
-//            }
-//            std::vector<double> pop2 = population;
-//            if (population.size() > 100) {
-//                std::random_shuffle(population.begin(), population.end());
-//                pop2.resize(100);
-//            }
-//            p_value = ks_test(pop2, sample);
             alglib::real_1d_array sample_v;
-            sample_v.setcontent(sample.size(), sample.data());
-            for (double d : population) {
+            if (sample.size() > 100) {
+                std::random_shuffle(sample.begin(), sample.end());
             }
+            sample_v.setcontent(std::min((int) sample.size(), 100), sample.data());
 
             double p1, p2;
             alglib::mannwhitneyutest(pop_v, pop_v.length(), sample_v, sample_v.length(), p_value, p1, p2);
