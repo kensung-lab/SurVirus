@@ -73,7 +73,7 @@ void categorize(int id, std::string contig, std::string bam_fname, int target_le
                     reads->push_back(bam_dup1(read));
                 }
                 mtx.unlock();
-            } else if (is_dc_pair(read) && get_avg_qual(read) > 10 && !is_poly_ACGT(read, true)) {
+            } else if (is_dc_pair(read) && /*get_avg_qual(read) > 10 &&*/ !is_poly_ACGT(read, true)) {
                 std::string target_name = contig;
                 std::string mate_target_name = header->target_name[read->core.mtid];
                 mtx.lock();

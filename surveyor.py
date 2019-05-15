@@ -39,6 +39,11 @@ config_file.write("max_sc_dist %d\n" % cmd_args.maxSCDist)
 config_file.close();
 
 
+def execute(cmd):
+    print "Executing:", cmd
+    os.system(cmd)
+
+
 # Find read length
 
 bam_names = cmd_args.bam_files.split(';')
@@ -177,63 +182,84 @@ for file_index, bam_file in enumerate(bam_files):
     bam_workspace = "%s/bam_%d/" % (cmd_args.workdir, file_index)
 
     isolate_cmd = "./isolate_relevant_pairs %s %s %s %s" % (bam_file.filename, cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
-    print "Executing:", isolate_cmd
-    os.system(isolate_cmd)
+    execute(isolate_cmd)
 
     filter_by_qname_cmd = "./filter_by_qname %s %s %s" % (bam_file.filename, cmd_args.workdir, bam_workspace)
-    print "Executing:", filter_by_qname_cmd
-    os.system(filter_by_qname_cmd)
+    execute(filter_by_qname_cmd)
 
     samtools_sortbyqname_cmd = "%s sort -n -@ %d -o %s/retained-pairs.qname-sorted.bam %s/retained-pairs.bam" % \
                                (cmd_args.samtools, cmd_args.threads, bam_workspace, bam_workspace)
-    print "Executing:", samtools_sortbyqname_cmd
-    os.system(samtools_sortbyqname_cmd)
+    execute(samtools_sortbyqname_cmd)
 
     samtools_dump_cmd = "%s fastq -1 %s/retained-pairs_1.fq -2 %s/retained-pairs_2.fq %s/retained-pairs.qname-sorted.bam" % \
                         (cmd_args.samtools, bam_workspace, bam_workspace, bam_workspace)
-    print "Executing:", samtools_dump_cmd
-    os.system(samtools_dump_cmd)
+    execute(samtools_dump_cmd)
 
     bwa_cmd = "%s mem -t %d %s %s/retained-pairs_1.fq %s/retained-pairs_2.fq | %s view -b -F 2304 > %s/retained-pairs-remapped.bam" \
               % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, \
                  bam_workspace, bam_workspace, cmd_args.samtools, bam_workspace)
-    print "Executing:", bwa_cmd
-    os.system(bwa_cmd)
+    execute(bwa_cmd)
 
     samtools_sort_cmd = "%s sort -@ %d %s/retained-pairs-remapped.bam -o %s/retained-pairs-remapped.sorted.bam" \
                         % (cmd_args.samtools, cmd_args.threads, bam_workspace, bam_workspace)
-    print "Executing:", samtools_sort_cmd
-    os.system(samtools_sort_cmd)
+    execute(samtools_sort_cmd)
 
     extract_clips_cmd = "./extract_clips %s %s %s" % (cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
-    print "Executing:", extract_clips_cmd
-    os.system(extract_clips_cmd)
+    execute(extract_clips_cmd)
 
+    # map virus clips
     bwa_aln_cmd = "%s aln -t %d %s %s/virus-clips.fa -f %s/virus-clips.sai" \
                   % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace)
-    bwa_samse_cmd = "%s samse %s %s/virus-clips.sai %s/virus-clips.fa | %s view -b -F 2308 > %s/virus-clips.bam" \
+    bwa_samse_cmd = "%s samse %s %s/virus-clips.sai %s/virus-clips.fa | %s view -b -F 2304 > %s/virus-clips.full.bam" \
                     % (cmd_args.bwa, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace, cmd_args.samtools, bam_workspace)
+    execute(bwa_aln_cmd)
+    execute(bwa_samse_cmd)
 
-    # bwa_cmd = "%s mem -t %d %s %s/virus-clips.fa | %s view -b -F 2308 > %s/virus-clips.bam" \
-    #           % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
-    #              cmd_args.samtools, bam_workspace)
-    print "Executing:", bwa_aln_cmd
-    os.system(bwa_aln_cmd)
-    print "Executing:", bwa_samse_cmd
-    os.system(bwa_samse_cmd)
+    filter_unmapped_cmd = "%s view -b -F 4 %s/virus-clips.full.bam > %s/virus-clips.aln.bam" \
+                          % (cmd_args.samtools, bam_workspace, bam_workspace)
+    execute(filter_unmapped_cmd)
 
+    dump_unmapped_fa = "%s fasta -f 4 %s/virus-clips.full.bam > %s/virus-clips.unmapped.fa" \
+                       % (cmd_args.samtools, bam_workspace, bam_workspace)
+    execute(dump_unmapped_fa)
+
+    bwa_mem_cmd = "%s mem -t %d %s %s/virus-clips.unmapped.fa | %s view -b -F 2308 > %s/virus-clips.mem.bam" \
+              % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
+                 cmd_args.samtools, bam_workspace)
+    execute(bwa_mem_cmd)
+
+    cat_cmd = "%s cat %s/virus-clips.aln.bam %s/virus-clips.mem.bam -o %s/virus-clips.bam" \
+              % (cmd_args.samtools, bam_workspace, bam_workspace, bam_workspace)
+    execute(cat_cmd)
+
+    # map host clips
     bwa_aln_cmd = "%s aln -t %d %s %s/host-clips.fa -f %s/host-clips.sai" \
                   % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace)
-    bwa_samse_cmd = "%s samse %s %s/host-clips.sai %s/host-clips.fa | %s view -b -F 2308 > %s/host-clips.bam" \
+    bwa_samse_cmd = "%s samse %s %s/host-clips.sai %s/host-clips.fa | %s view -b -F 2304 > %s/host-clips.full.bam" \
                     % (cmd_args.bwa, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace, cmd_args.samtools,
                        bam_workspace)
     # bwa_cmd = "%s mem -t %d -h %d %s %s/host-clips.fa | %s view -b -F 2308 > %s/host-clips.bam" \
     #           % (cmd_args.bwa, cmd_args.threads, n_viruses, cmd_args.host_and_virus_reference, bam_workspace,
     #              cmd_args.samtools, bam_workspace)
-    print "Executing:", bwa_aln_cmd
-    os.system(bwa_aln_cmd)
-    print "Executing:", bwa_samse_cmd
-    os.system(bwa_samse_cmd)
+    execute(bwa_aln_cmd)
+    execute(bwa_samse_cmd)
+
+    filter_unmapped_cmd = "%s view -b -F 4 %s/host-clips.full.bam > %s/host-clips.aln.bam" \
+                          % (cmd_args.samtools, bam_workspace, bam_workspace)
+    execute(filter_unmapped_cmd)
+
+    dump_unmapped_fa = "%s fasta -f 4 %s/host-clips.full.bam > %s/host-clips.unmapped.fa" \
+                       % (cmd_args.samtools, bam_workspace, bam_workspace)
+    execute(dump_unmapped_fa)
+
+    bwa_mem_cmd = "%s mem -t %d %s %s/host-clips.unmapped.fa | %s view -b -F 2308 > %s/host-clips.mem.bam" \
+                  % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
+                     cmd_args.samtools, bam_workspace)
+    execute(bwa_mem_cmd)
+
+    cat_cmd = "%s cat %s/host-clips.aln.bam %s/host-clips.mem.bam -o %s/host-clips.bam" \
+              % (cmd_args.samtools, bam_workspace, bam_workspace, bam_workspace)
+    execute(cat_cmd)
 
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-clips.sorted.bam" % bam_workspace,
                "%s/host-clips.bam" % bam_workspace)

@@ -355,6 +355,13 @@ std::pair<int, const uint32_t*> cigar_str_to_array(std::string& cigar_str) {
     std::copy(opv.begin(), opv.end(), opa);
     return std::make_pair(opv.size(), opa);
 }
+std::string cigar_array_to_str(int cigar_len, const uint32_t* cigar) {
+    std::stringstream ss;
+    for (int i = 0; i < cigar_len; i++) {
+        ss << bam_cigar_oplen(cigar[i]) << bam_cigar_opchr(cigar[i]);
+    }
+    return ss.str();
+}
 
 struct open_samFile_t {
     samFile* file;
