@@ -416,5 +416,17 @@ samFile* open_bam_writer(std::string workspace, std::string name, bam_hdr_t* hea
     return writer;
 }
 
+template<typename T>
+inline T max(T a, T b, T c) { return std::max(std::max(a,b), c); }
+
+template<typename T>
+inline T max(T a, T b, T c, T d) { return std::max(std::max(a,b), std::max(c,d)); }
+
+template<typename T>
+inline T min(T a, T b, T c) { return std::min(std::min(a,b), c); }
+
+template<typename T>
+inline T min(T a, T b, T c, T d) { return std::min(std::min(a,b), std::min(c,d)); }
+
 
 #endif //SURVEYOR_SAM_UTILS_H
