@@ -181,7 +181,8 @@ with open("%s/random_pos.txt" % cmd_args.workdir, "w") as random_pos_file:
 for file_index, bam_file in enumerate(bam_files):
     bam_workspace = "%s/bam_%d/" % (cmd_args.workdir, file_index)
 
-    isolate_cmd = "./isolate_relevant_pairs %s %s %s %s" % (bam_file.filename, cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
+    isolate_cmd = "./isolate_relevant_pairs %s %s %s %s %s" % (bam_file.filename, cmd_args.host_reference,
+                                                            cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
     execute(isolate_cmd)
 
     filter_by_qname_cmd = "./filter_by_qname %s %s %s" % (bam_file.filename, cmd_args.workdir, bam_workspace)
@@ -300,3 +301,9 @@ for file_index, bam_file in enumerate(bam_files):
                       bam_workspace, bam_workspace, cmd_args.workdir)
     print "Executing:", remapper_cmd
     os.system(remapper_cmd)
+
+    filter_cmd = "./filter %s > %s/results.t1.txt" % (bam_workspace, bam_workspace)
+    execute(filter_cmd)
+
+    filter_cmd = "./filter %s --print-rejected > %s/results.discarded.txt" % (bam_workspace, bam_workspace)
+    execute(filter_cmd)
