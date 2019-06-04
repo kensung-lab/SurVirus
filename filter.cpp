@@ -11,7 +11,7 @@ struct breakpoint_t {
 
     breakpoint_t() {}
     breakpoint_t(std::string& str) {
-        char chr[100], strand;
+        char chr[1000], strand;
         sscanf(str.data(), "%[^:]:%c%d", chr, &strand, &pos);
         this->chr = chr;
         rev = (strand == '-');
@@ -97,10 +97,12 @@ int main(int argc, char* argv[]) {
     std::ifstream fin(workspace + "/results.txt");
 
     std::vector<double> args;
-    bool print_rejected = false;
+    bool print_rejected = false, accept_clipped = false;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--print-rejected") == 0) {
             print_rejected = true;
+        } else if (strcmp(argv[i], "--accept-all-clipped") == 0) {
+            accept_clipped = true;
         } else {
             args.push_back(std::stod(argv[i]));
         }
@@ -125,6 +127,7 @@ int main(int argc, char* argv[]) {
         if (call.host_pbs < min_host_pbs) accept = false;
 
         if (call.coverage() >= min_cov_for_accept) accept = true;
+        if (accept_clipped && call.split_reads > 0) accept = true;
 
         if (accept) {
             accepted_calls.push_back(call);
@@ -180,5 +183,4 @@ int main(int argc, char* argv[]) {
     } else {
         print_calls(accepted_calls);
     }
-
 }

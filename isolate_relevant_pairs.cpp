@@ -64,7 +64,7 @@ std::mutex mtx;
 config_t config;
 std::ofstream fout;
 
-std::unordered_set<std::string> virus_names;
+std::unordered_set<std::string> host_names;
 
 
 inline ull mask(ull kmer, int seg_n) {
@@ -123,7 +123,7 @@ void isolate(int id, char* bam_fname, int t_num) {
     open_samFile_t* bam_file = open_samFile(bam_fname, false);
 
     std::string t_name = bam_file->header->target_name[t_num];
-    bool is_virus = virus_names.count(t_name);
+    bool is_host = host_names.count(t_name);
 
     char region[1000];
     sprintf(region, "%s:%d-%d", t_name.c_str(), 1, bam_file->header->target_len[t_num]);
@@ -137,7 +137,7 @@ void isolate(int id, char* bam_fname, int t_num) {
     bam1_t* read = bam_init1();
     while (sam_itr_next(bam_file->file, iter, read) >= 0) {
         uint32_t* c = bam_get_cigar(read);
-        if (!is_virus && bam_cigar_op(c[0]) == BAM_CMATCH && read->core.n_cigar == 1) continue; // ignore if all matches
+        if (is_host && bam_cigar_op(c[0]) == BAM_CMATCH && read->core.n_cigar == 1) continue; // ignore if all matches
 
         if (read->core.flag & BAM_FDUP) continue;
 
@@ -188,22 +188,30 @@ int main(int argc, char* argv[]) {
     nucl_bm['N'] = 0;
 
     std::string bam_fname = argv[1];
-    std::string virus_ref = argv[2];
-    std::string workdir = argv[3];
-    std::string workspace = argv[4];
+    std::string host_ref = argv[2];
+    std::string virus_ref = argv[3];
+    std::string workdir = argv[4];
+    std::string workspace = argv[5];
 
-    FILE* fastaf = fopen(virus_ref.c_str(), "r");
+    FILE* fastaf = fopen(host_ref.c_str(), "r");
     kseq_t* seq = kseq_init(fileno(fastaf));
     int l;
     while ((l = kseq_read(seq)) >= 0) {
         std::string qname = seq->name.s;
-        virus_names.insert(qname);
+        host_names.insert(qname);
+    }
+    kseq_destroy(seq);
+    fclose(fastaf);
 
+    fastaf = fopen(virus_ref.c_str(), "r");
+    seq = kseq_init(fileno(fastaf));
+    while ((l = kseq_read(seq)) >= 0) {
         index_seq(seq->seq.s, seq->seq.l);
         get_rc(seq->seq.s, seq->seq.l);
         index_seq(seq->seq.s, seq->seq.l);
     }
     kseq_destroy(seq);
+    fclose(fastaf);
 
     open_samFile_t* bam_file = open_samFile(bam_fname.c_str());
 
