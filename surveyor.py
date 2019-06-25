@@ -24,10 +24,13 @@ cmd_parser.add_argument('--wgs', action='store_true', help='The reference genome
 cmd_parser.add_argument('--coveredRegionsBed', default='',
                         help='In case only a few regions of the genome are covered by reads, this directs SurVirus'
                              'on where to sample reads. In case --wgs is not used and this is not provided,'
-                             'SurVirus will compute such file itself.')
+                             'SurVirus will compute such file by itself.')
 cmd_parser.add_argument('--minClipSize', type=int, default=18, help='Min size for a clip to be considered.')
 cmd_parser.add_argument('--maxSCDist', type=int, default=10, help='Max SC distance.')
 cmd_args = cmd_parser.parse_args()
+
+bam_names = cmd_args.bam_files.split(';')
+bam_files = [pysam.AlignmentFile(bam_name) for bam_name in bam_names]
 
 
 # Create config file in workdir
@@ -165,8 +168,6 @@ for file_index, bam_file in enumerate(bam_files):
         stat_file.write("read_len %d\n" % read_len)
 
 
-# rand_pos_gen = RandomPositionGenerator([(r[0], r[1]+max_is, r[2]-max_is) for r in sampling_regions if r[2]-r[1] > 2*max_is])
-
 print "Regenerating random genomic positions..."
 random_positions = []
 for i in range(1,GEN_DIST_SIZE*2):
@@ -178,8 +179,10 @@ with open("%s/random_pos.txt" % cmd_args.workdir, "w") as random_pos_file:
         random_pos_file.write("%s %d\n" % random_pos)
 
 
+bam_workspaces = []
 for file_index, bam_file in enumerate(bam_files):
     bam_workspace = "%s/bam_%d/" % (cmd_args.workdir, file_index)
+    bam_workspaces.append(bam_workspace)
 
     isolate_cmd = "./isolate_relevant_pairs %s %s %s %s %s" % (bam_file.filename, cmd_args.host_reference,
                                                             cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
@@ -268,20 +271,17 @@ for file_index, bam_file in enumerate(bam_files):
                "%s/virus-clips.bam" % bam_workspace)
 
     read_categorizer_cmd = "./reads_categorizer %s %s %s" % (cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
-    print "Executing:", read_categorizer_cmd
-    os.system(read_categorizer_cmd)
+    execute(read_categorizer_cmd)
 
     bwa_cmd = "%s mem -t %d -h %d %s %s/virus-side.fq | %s view -b -F 2308 > %s/virus-side.bam" \
               % (cmd_args.bwa, cmd_args.threads, n_viruses, cmd_args.host_and_virus_reference, bam_workspace,
                  cmd_args.samtools, bam_workspace)
-    print "Executing:", bwa_cmd
-    os.system(bwa_cmd)
+    execute(bwa_cmd)
 
     bwa_cmd = "%s mem -t %d -h 100 %s %s/host-side.fq | %s view -b -F 2308 > %s/host-side.bam" \
               % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
                  cmd_args.samtools, bam_workspace)
-    print "Executing:", bwa_cmd
-    os.system(bwa_cmd)
+    execute(bwa_cmd)
 
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-side.sorted.bam" % bam_workspace,
                "%s/host-side.bam" % bam_workspace)
@@ -292,18 +292,41 @@ for file_index, bam_file in enumerate(bam_files):
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-anchors.sorted.bam" % bam_workspace,
                "%s/virus-anchors.bam" % bam_workspace)
 
-    readsx = bam_workspace + "/readsx"
-    if not os.path.exists(readsx):
-        os.makedirs(readsx)
+readsx = cmd_args.workdir + "/readsx"
+if not os.path.exists(readsx):
+    os.makedirs(readsx)
 
-    remapper_cmd = "./remapper %s %s %s %s %s > %s/results.txt 2> %s/log.txt" \
-                   % (bam_file.filename, cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir,
-                      bam_workspace, bam_workspace, cmd_args.workdir)
-    print "Executing:", remapper_cmd
-    os.system(remapper_cmd)
 
-    filter_cmd = "./filter %s > %s/results.t1.txt" % (bam_workspace, bam_workspace)
-    execute(filter_cmd)
+bam_files_and_workspaces = " ".join([bam_files[i].filename + " " + bam_workspaces[i] for i in xrange(len(bam_workspaces))])
+remapper_cmd = "./remapper %s %s %s %s > %s/results.txt 2> %s/log.txt" \
+               % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir,
+                  bam_files_and_workspaces, cmd_args.workdir, cmd_args.workdir)
+execute(remapper_cmd)
 
-    filter_cmd = "./filter %s --print-rejected > %s/results.discarded.txt" % (bam_workspace, bam_workspace)
-    execute(filter_cmd)
+filter_cmd = "./filter %s > %s/results.t1.txt" % (cmd_args.workdir, cmd_args.workdir)
+execute(filter_cmd)
+
+filter_cmd = "./filter %s --print-rejected > %s/results.discarded.txt" % (cmd_args.workdir, cmd_args.workdir)
+execute(filter_cmd)
+
+
+print "Finding alternative locations..."
+
+bwa_cmd = "%s mem -t %d -h 1000 %s %s/bp_seqs.fa | %s view -b -F 2308 > %s/bp_seqs.bam" \
+          % (cmd_args.bwa, cmd_args.threads, cmd_args.host_reference, cmd_args.workdir, cmd_args.samtools, cmd_args.workdir)
+execute(bwa_cmd)
+
+with pysam.AlignmentFile("%s/bp_seqs.bam" % cmd_args.workdir) as bp_seqs_bam, \
+        open("%s/results.alternative.txt" % cmd_args.workdir, 'w') as altf:
+    for r in bp_seqs_bam.fetch(until_eof=True):
+        if not r.has_tag('XA'): continue
+
+        xa_regions = r.get_tag('XA').split(';')[:-1]
+        pos = r.reference_start if r.is_reverse else r.reference_end
+        altf.write("ID=%s %s:%c%d\n" % (r.qname, r.reference_name, "-" if r.is_reverse else "+", pos))
+        for xa_region in xa_regions:
+            xa_region_split = xa_region.split(',')
+            pos = int(xa_region_split[1])
+            if pos > 0: pos += r.query_length
+            altf.write("ID=%s %s:%c%d\n" % (r.qname, xa_region_split[0], "+" if pos > 0 else "-", abs(pos)))
+
