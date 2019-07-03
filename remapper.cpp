@@ -49,9 +49,7 @@ std::unordered_map<int, int> contig_id2tid, contig_tid2id;
 std::unordered_map<std::string, std::pair<char*, size_t> > chrs;
 std::unordered_map<std::string, int> virus_names;
 
-std::unordered_map<std::string, uint32_t> cigar_ids;
-
-google::dense_hash_map<std::string, std::vector<std::string> > pairs_by_seq;
+google::dense_hash_map<std::string, std::vector<std::string> > dedup_pairs_by_head_qname;
 
 ull nucl_bm[256] = { 0 };
 char bm_nucl[4] = { 'A', 'C', 'G', 'T' };
@@ -153,8 +151,21 @@ struct read_realignment_t {
     int left_clip_len() {
         return bam_cigar_opchr(cigar[0]) == 'S' ? bam_cigar_oplen(cigar[0]) : 0;
     }
+    int left_clip_avg_qual() {
+        // if bam_is_rev, get_sequence(read, true) returns a sequence that is RC wrt the BAM file
+        // if read_realignment.rc, then we RCed the result of get_sequence(read, true) before aligning to the region
+        // this means, if bam_is_rev == read_realignment.rc, the sequence is the same as the BAM file
+        // otherwise, we RCed it, and the qualities are now reversed
+        return bam_is_rev(read) != rc ? get_avg_qual(read, read->core.l_qseq-left_clip_len(), read->core.l_qseq) :
+        get_avg_qual(read, 0, left_clip_len());
+    }
+
     int right_clip_len() {
         return bam_cigar_opchr(cigar[cigar_len-1]) == 'S' ? bam_cigar_oplen(cigar[cigar_len-1]) : 0;
+    }
+    int right_clip_avg_qual() {
+        return bam_is_rev(read) != rc ? get_avg_qual(read, 0, right_clip_len()) :
+        get_avg_qual(read, read->core.l_qseq-right_clip_len(), read->core.l_qseq);
     }
 };
 
@@ -195,9 +206,17 @@ bool is_virus_region(const region_t *region) {
     return virus_names.count(contig_id2name[region->contig_id]);
 };
 
-bool reads_contain_qname(std::vector<bam1_t*> reads, std::string qname) {
+bool reads_contain_qname(std::vector<bam1_t*>& reads, std::string qname) {
     for (bam1_t* r : reads) {
         if (std::string(bam_get_qname(r)) == qname) {
+            return true;
+        }
+    }
+    return false;
+}
+bool rr_contain_qname(std::vector<read_realignment_t>& reads, std::string qname) {
+    for (read_realignment_t& rr : reads) {
+        if (std::string(bam_get_qname(rr.read)) == qname) {
             return true;
         }
     }
@@ -463,13 +482,9 @@ bool accept_alignment(StripedSmithWaterman::Alignment& alignment, std::string& q
 };
 
 
-void write_alignment_to_bytes(char bytes[16], uint32_t region_id, uint32_t read_id, std::string& cigar, uint16_t ref_begin,
+void write_alignment_to_bytes(char bytes[16], uint32_t region_id, uint32_t read_id, uint32_t cigar_id, uint16_t ref_begin,
         bool is_rc, uint16_t score) {
 
-    mtx.lock();
-    if (cigar_ids.count(cigar) == 0) cigar_ids[cigar] = cigar_ids.size();
-    uint32_t cigar_id = cigar_ids[cigar];
-    mtx.unlock();
     cigar_id = (is_rc ? 0x80000000 : 0) | (cigar_id & 0x7FFFFFFF); // forcing is_rc inside the cigar_id to make 16 bytes
 
     memcpy(bytes, &region_id, 4);
@@ -480,12 +495,12 @@ void write_alignment_to_bytes(char bytes[16], uint32_t region_id, uint32_t read_
 }
 
 
-void add_realignment_to_region(read_realignment_t& rr, int region_id) {
+void add_realignment_to_region(read_realignment_t& rr, int region_id, int max_score = 0) {
     if (rr.read->core.flag & BAM_FSECONDARY) { // good clip
-        if (rr.left_clip_len()) {
+        if (rr.left_clip_len() >= config.min_sc_size) {
             reads_per_region_rc[region_id].push_back(rr);
         }
-        if (rr.right_clip_len()) {
+        if (rr.right_clip_len() >= config.min_sc_size) {
             reads_per_region[region_id].push_back(rr);
         }
     } else { // the read points toward the bp
@@ -494,33 +509,22 @@ void add_realignment_to_region(read_realignment_t& rr, int region_id) {
     }
 }
 
-inline void remap_read(std::string seq, bam1_t* read, int read_id, region_t* region, bool is_rc, StripedSmithWaterman::Aligner& aligner, StripedSmithWaterman::Filter& filter) {
+inline read_realignment_t remap_read(std::string seq, bam1_t* read, region_t* region, bool is_rc, StripedSmithWaterman::Aligner& aligner, StripedSmithWaterman::Filter& filter) {
     StripedSmithWaterman::Alignment alignment;
     aligner.Align(seq.c_str(), chrs[contig_id2name[region->contig_id]].first + region->start,
                   region->end - region->start, filter, &alignment, 0);
 
-    if (!accept_alignment(alignment, seq)) return;
+    if (!accept_alignment(alignment, seq)) return read_realignment_t();
 
     std::string cigar = alignment_cigar_to_bam_cigar(alignment.cigar);
     auto cigar_v = cigar_str_to_array(cigar);
-
-    mtx_regions[region->id].lock();
-    read_realignment_t rr(read, alignment.ref_begin, alignment.ref_end, cigar_v.first, cigar_v.second, alignment.sw_score, is_rc);
-    add_realignment_to_region(rr, region->id);
-    mtx_regions[region->id].unlock();
-
-    char line[16]; // each line is 16 bytes
-    write_alignment_to_bytes(line, region->id, read_id, cigar, alignment.ref_begin, is_rc, alignment.sw_score);
-
-    mtx.lock();
-    fwrite(line, 1, 16, scores_file_out_bin);
-    mtx.unlock();
-
 
     remappings++;
     if (remappings % 1000000 == 0) {
         std::cerr << remappings << " remappings done." << std::endl;
     }
+
+    return read_realignment_t(read, alignment.ref_begin, alignment.ref_end, cigar_v.first, cigar_v.second, alignment.sw_score, is_rc);
 }
 
 void associate_reads_to_regions(int id, std::vector<bam1_t*>* host_reads, int start, int end) {
@@ -536,12 +540,12 @@ void associate_reads_to_regions(int id, std::vector<bam1_t*>* host_reads, int st
     std::fill(last_read_for_region, last_read_for_region+MAX_REGIONS, end+1);
     std::fill(last_read_for_region_rc, last_read_for_region_rc+MAX_REGIONS, end+1);
 
-    //StripedSmithWaterman::Aligner aligner(1, 2, 4, 1, false);
     StripedSmithWaterman::Aligner aligner(1, 4, 6, 1, false);
     StripedSmithWaterman::Filter filter;
     StripedSmithWaterman::Alignment alignment;
     for (int r = start+1; r <= end; r++) {
         bam1_t* read = (*host_reads)[r-1];
+        std::vector<std::pair<read_realignment_t, int> > realignments;
 
         std::string seq = get_sequence(read, true);
         std::string seq_rc = seq;
@@ -563,7 +567,8 @@ void associate_reads_to_regions(int id, std::vector<bam1_t*>* host_reads, int st
                     if (last_read_for_region[region->id] == r && i - last_pos[region->id] >= KMER_LEN) {
                         last_read_for_region[region->id] = -r;
 
-                        remap_read(seq, read, r-1, region, false, aligner, filter);
+                        read_realignment_t rr = remap_read(seq, read, region, false, aligner, filter);
+                        if (rr.accepted()) realignments.push_back({rr, region->id});
                     } else if (abs(last_read_for_region[region->id]) != r) {
                         last_read_for_region[region->id] = r;
                         last_pos[region->id] = i;
@@ -574,12 +579,25 @@ void associate_reads_to_regions(int id, std::vector<bam1_t*>* host_reads, int st
                     if (last_read_for_region_rc[region->id] == r && i - last_pos_rc[region->id] >= KMER_LEN) {
                         last_read_for_region_rc[region->id] = -r;
 
-                        remap_read(seq_rc, read, r-1, region, true, aligner, filter);
+                        read_realignment_t rr = remap_read(seq_rc, read, region, true, aligner, filter);
+                        if (rr.accepted()) realignments.push_back({rr, region->id});
                     } else if (abs(last_read_for_region_rc[region->id]) != r) {
                         last_read_for_region_rc[region->id] = r;
                         last_pos_rc[region->id] = i;
                     }
                 }
+            }
+        }
+
+        uint16_t max_score = 0;
+        for (std::pair<read_realignment_t, int>& rr : realignments) {
+            max_score = std::max(max_score, rr.first.score);
+        }
+        for (std::pair<read_realignment_t, int>& rr_and_region : realignments) {
+            if (rr_and_region.first.score >= max_score*0.75) {
+                mtx_regions[rr_and_region.second].lock();
+                add_realignment_to_region(rr_and_region.first, rr_and_region.second, max_score);
+                mtx_regions[rr_and_region.second].unlock();
             }
         }
     }
@@ -591,11 +609,11 @@ void associate_reads_to_regions(int id, std::vector<bam1_t*>* host_reads, int st
 }
 
 
-std::pair<int, int> compute_region_score(region_t* region, bool rc, std::unordered_set<bam1_t*>& already_used) {
+std::pair<int, int> compute_region_score(region_t* region, bool rc, google::dense_hash_set<std::string>& already_used) {
     int score = 0, reads = 0;
     std::vector<read_realignment_t>& read_realignments = rc ? reads_per_region_rc[region->id] : reads_per_region[region->id];
     for (read_realignment_t& rr : read_realignments) {
-        if (already_used.count(rr.read) == 0) {
+        if (!already_used.count(bam_get_qname(rr.read))) {
             score += rr.score;
             reads++;
         }
@@ -836,7 +854,7 @@ int get_last_max_element(int* v, int len) {
     return max_pos;
 }
 std::pair<int, int> get_accept_window(std::vector<read_realignment_t>& realigned_reads, bool rc, int region_len,
-        google::dense_hash_map<std::string, int>& deduped_qnames) {
+        google::dense_hash_map<std::string, std::vector<std::string> >& deduped_qnames) {
 
     int clip_positions[100000];
     uint16_t min_offset = region_len, max_offset = 0;
@@ -913,21 +931,21 @@ void dedup_reads(std::vector<bam1_t*>& host_reads, std::vector<bam1_t*>& virus_r
     // DEDUP BY SEQUENCE
 
     // dedup pairs
-    pairs_by_seq.set_empty_key("");
+    dedup_pairs_by_head_qname.set_empty_key("");
     for (bam1_t* hread : host_reads) {
         if (!(hread->core.flag & BAM_FSECONDARY) && virus_reads_by_name.count(bam_get_qname(hread))) {
             bam1_t* vread = virus_reads_by_name[bam_get_qname(hread)];
             std::string joint_string = get_sequence(hread, true) + "-" + get_sequence(vread, true);
-            pairs_by_seq[joint_string].push_back(bam_get_qname(hread));
+            dedup_pairs_by_head_qname[joint_string].push_back(bam_get_qname(hread));
         }
     }
-    for (auto& e : pairs_by_seq) {
+    for (auto& e : dedup_pairs_by_head_qname) {
         std::sort(e.second.begin(), e.second.end());
     }
 
     google::dense_hash_set<std::string> deduped_qnames;
     deduped_qnames.set_empty_key("");
-    for (auto& e : pairs_by_seq) {
+    for (auto& e : dedup_pairs_by_head_qname) {
         deduped_qnames.insert(e.second[0]);
     }
 
@@ -976,10 +994,12 @@ void dedup_reads(std::vector<bam1_t*>& host_reads, std::vector<bam1_t*>& virus_r
             // keep last_valid_i
             std::string last_valid_seq = get_sequence(h1, true) + "-" + get_sequence(v1, true);
             std::string curr_seq = get_sequence(h2, true) + "-" + get_sequence(v2, true);
-            std::vector<std::string>& pairs_by_curr_seq = pairs_by_seq[curr_seq];
-            std::vector<std::string>& pairs_by_last_valid_seq = pairs_by_seq[last_valid_seq];
-            pairs_by_last_valid_seq.insert(pairs_by_last_valid_seq.end(), pairs_by_curr_seq.begin(), pairs_by_curr_seq.end());
-            pairs_by_curr_seq.clear();
+            if (!dedup_pairs_by_head_qname.count(curr_seq) || dedup_pairs_by_head_qname.count(last_valid_seq)) {
+                std::vector<std::string>& pairs_by_curr_seq = dedup_pairs_by_head_qname[curr_seq];
+                std::vector<std::string>& pairs_by_last_valid_seq = dedup_pairs_by_head_qname[last_valid_seq];
+                pairs_by_last_valid_seq.insert(pairs_by_last_valid_seq.end(), pairs_by_curr_seq.begin(), pairs_by_curr_seq.end());
+                pairs_by_curr_seq.clear();
+            }
         } else {
             deduped_qnames.insert(bam_get_qname(h1));
             last_valid_i = i;
@@ -995,10 +1015,10 @@ void dedup_reads(std::vector<bam1_t*>& host_reads, std::vector<bam1_t*>& virus_r
     std::cerr << "VIRUS READS " << virus_reads.size() << std::endl;
 }
 
-google::dense_hash_map<std::string, int> dedup_reads(std::vector<read_realignment_t>& host_read_realignments,
+google::dense_hash_map<std::string, std::vector<std::string> > dedup_reads(std::vector<read_realignment_t>& host_read_realignments,
                                                 std::vector<read_realignment_t> virus_read_realignments) {
     if (host_read_realignments.empty() || virus_read_realignments.empty()) {
-        google::dense_hash_map<std::string, int> empty_set;
+        google::dense_hash_map<std::string, std::vector<std::string> > empty_set;
         empty_set.set_empty_key("");
         return empty_set;
     }
@@ -1037,7 +1057,7 @@ google::dense_hash_map<std::string, int> dedup_reads(std::vector<read_realignmen
     int* head = new int[virus_read_realignments.size()];
     for (int i = 0; i < virus_read_realignments.size(); i++) head[i] = i;
 
-    google::dense_hash_map<std::string, int> qnames_to_keep;
+    google::dense_hash_map<std::string, std::vector<std::string> > qnames_to_keep;
     qnames_to_keep.set_empty_key("");
     std::string curr_head_qname;
     for (int i = 0; i < virus_read_realignments.size(); i++) {
@@ -1054,7 +1074,8 @@ google::dense_hash_map<std::string, int> dedup_reads(std::vector<read_realignmen
                 has_prev_dup = true;
                 head[i] = head[j];
                 std::string curr_seq = get_sequence(hrr_i.read, true) + "-" + get_sequence(vrr_i.read, true);
-                qnames_to_keep[curr_head_qname] += pairs_by_seq[curr_seq].size();
+                qnames_to_keep[curr_head_qname].insert(qnames_to_keep[curr_head_qname].end(),
+                        dedup_pairs_by_head_qname[curr_seq].begin(), dedup_pairs_by_head_qname[curr_seq].end());
                 break;
             }
         }
@@ -1062,7 +1083,7 @@ google::dense_hash_map<std::string, int> dedup_reads(std::vector<read_realignmen
         if (!has_prev_dup) {
             curr_head_qname = bam_get_qname(hrr_i.read);
             std::string seq = get_sequence(hrr_i.read, true) + "-" + get_sequence(vrr_i.read, true);
-            qnames_to_keep[bam_get_qname(vrr_i.read)] = pairs_by_seq[seq].size();
+            qnames_to_keep[bam_get_qname(vrr_i.read)] = dedup_pairs_by_head_qname[seq];
         }
     }
     return qnames_to_keep;
@@ -1117,18 +1138,19 @@ std::pair<int,int> remap_virus_reads_supp(region_t* virus_region, bool vregion_r
         virus_read_realignments_local.push_back(rr);
     }
 
-    auto remove_rr = [] (read_realignment_t& rr, std::pair<int, int> accept_window, bool rc) {
+    auto remove_rr = [&virus_region] (read_realignment_t& rr, std::pair<int, int> accept_window, bool rc) {
+        int MIN_QUAL = 10;
         bool remove = rr.offset_start < accept_window.first || rr.offset_end > accept_window.second;
-        if (rr.left_clip_len() > config.max_sc_dist) {
+        if (rr.left_clip_len() > config.max_sc_dist && rr.left_clip_avg_qual() >= MIN_QUAL) {
             remove |= abs(rr.offset_start - accept_window.first) > config.max_sc_dist;
         }
-        if (rr.right_clip_len() > config.max_sc_dist) {
+        if (rr.right_clip_len() > config.max_sc_dist && rr.right_clip_avg_qual() >= MIN_QUAL) {
             remove |= abs(rr.offset_end - accept_window.second) > config.max_sc_dist;
         }
         return remove;
     };
 
-    google::dense_hash_map<std::string, int> deduped_qnames = dedup_reads(host_read_realignments_local, virus_read_realignments_local);
+    google::dense_hash_map<std::string, std::vector<std::string> > deduped_qnames = dedup_reads(host_read_realignments_local, virus_read_realignments_local);
 
     google::dense_hash_set<std::string> to_be_removed;
     to_be_removed.set_empty_key("");
@@ -1159,6 +1181,7 @@ std::pair<int,int> remap_virus_reads_supp(region_t* virus_region, bool vregion_r
             virus_read_realignments->push_back(vrr);
         }
     }
+
     return {h_score, v_score};
 }
 
@@ -1267,7 +1290,7 @@ std::pair<region_t*, bool> remap_virus_reads(region_score_t& host_region_score, 
     remap_virus_reads_supp(best_region, !is_best_vregion_fwd, read_seq_ids, host_region_score.region, !host_region_score.fwd,
             host_alignments, &virus_read_realignments, aligner, filter);
 
-    google::dense_hash_map<std::string, int> deduped_reads = dedup_reads(host_alignments, virus_read_realignments);
+    google::dense_hash_map<std::string, std::vector<std::string> > deduped_reads = dedup_reads(host_alignments, virus_read_realignments);
 
     std::cerr << "BEFORE " << host_region_score.to_str() << std::endl;
     google::dense_hash_set<std::string> remapped_virus_qnames;
@@ -1479,8 +1502,49 @@ google::dense_hash_set<std::string> mismatch_filter(region_t* host_region, std::
         std::cerr << bam_get_qname(hrr.read) << " " << cigar_array_to_str(hrr.cigar_len, hrr.cigar) << " " << read_sequence << std::endl;
     }
 
+
+    // find homopolymers
+    // TODO: if slow, implement a linear version
+    int count[256];
+    std::vector<std::pair<int, int> > homopolymers;
+    for (std::string seq : read_sequences) {
+        std::pair<int, int> curr_homopolymer = {-1, -1};
+        int best_score = 0;
+        for (int i = 0; i < seq.length(); i++) {
+            count['A'] = count['C'] = count['G'] = count['T'] = 0;
+            for (int j = i; j < seq.length(); j++) {
+                if (seq[j] == 'A' || seq[j] == 'C' || seq[j] == 'G' || seq[j] == 'T') {
+                    count['A']--;
+                    count['C']--;
+                    count['G']--;
+                    count['T']--;
+                    count[seq[j]] += 2;
+
+                    int curr_score = max(count['A'], count['C'], count['G'], count['T']);
+                    if (curr_score < 10 || curr_score < 0.8*(j-i+1)) continue;
+
+                    if (curr_score > best_score || (curr_score == best_score && j-i < curr_homopolymer.second-curr_homopolymer.first)) {
+                        best_score = curr_score;
+                        curr_homopolymer = {i,j};
+                    }
+                }
+            }
+        }
+
+        homopolymers.push_back(curr_homopolymer);
+    }
+
+    for (int i = 0; i < homopolymers.size(); i++) {
+        std::pair<int, int> hp = homopolymers[i];
+        if (hp.first != -1) {
+            std::cerr << "HOMO " << bam_get_qname(hrrs[i].read) << " " << read_sequences[i] << " "
+                << read_sequences[i].substr(hp.first, hp.second-hp.first+1) << std::endl;
+        }
+    }
+
     int s = 0, e = 0;
     std::vector<int> read_offsets, read_errors;
+    char prev_consensus = ' ';
     for (int pos = 0; pos < host_region->len(); pos++) {
         while (s < hrrs.size() && hrrs[s].offset_end < pos) s++;
         while (e < hrrs.size() && hrrs[e].offset_start < pos) {
@@ -1509,15 +1573,25 @@ google::dense_hash_set<std::string> mismatch_filter(region_t* host_region, std::
 
         for (int i = s; i < e; i++) {
             if (read_offsets[i] >= read_sequences[i].length()) continue;
+
+            // erros in homopolymer are fine - see https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4719071/
+            if (read_offsets[i] >= homopolymers[i].first && read_offsets[i] <= homopolymers[i].second) {
+                read_offsets[i]++;
+                continue;
+            }
+
             char base = read_sequences[i][read_offsets[i]];
             if (base != consensus) {
                 read_errors[i]++;
-                if (base == 'D' || consensus == 'D') { // indel error is penalized more than just a mismatch
+                if ((base == 'D' && read_offsets[i] > 0 && read_sequences[i][read_offsets[i]] != 'D')
+                || (consensus == 'D' && prev_consensus != 'D')) { // indel error is penalized more than just a mismatch
                     read_errors[i]++;
                 }
             }
             read_offsets[i]++;
         }
+
+        prev_consensus = consensus;
     }
 
     google::dense_hash_set<std::string> qnames_to_remove;
@@ -1732,8 +1806,6 @@ int main(int argc, char* argv[]) {
 
         /* == */
 
-        std::cerr << "HOST READS: " << host_reads.size() << std::endl;
-
         for (auto& e : good_clipped_pairs) {
             if (e.second.size() == 2) {
                 bam1_t *r1 = e.second[0].first, *r2 = e.second[1].first;
@@ -1813,6 +1885,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cerr << "HOST READS: " << host_reads.size() << std::endl;
+    std::cerr << "VIRUS READS: " << host_reads.size() << std::endl;
 
     /* ====== */
 
@@ -1971,6 +2044,37 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // write file
+        std::cerr << "WRITING FILE reads.score.bin" << std::endl;
+        google::dense_hash_map<bam1_t*, uint32_t> read_ids;
+        google::dense_hash_map<std::string, uint32_t> cigar_ids;
+        read_ids.set_empty_key(NULL);
+        cigar_ids.set_empty_key("");
+        for (int i = 0; i < host_reads.size(); i++) {
+            read_ids[host_reads[i]] = i;
+        }
+        for (int i = 0; i < host_regions.size(); i++) {
+            auto& v_fwd = reads_per_region[i];
+            for (read_realignment_t& rr : v_fwd) {
+                char line[16]; // each line is 16 bytes
+                std::string cigar = cigar_array_to_str(rr.cigar_len, rr.cigar);
+                if (cigar_ids.count(cigar) == 0) cigar_ids[cigar] = cigar_ids.size();
+                uint32_t cigar_id = cigar_ids[cigar];
+                write_alignment_to_bytes(line, i, read_ids[rr.read], cigar_id, rr.offset_start, rr.rc, rr.score);
+                fwrite(line, 1, 16, scores_file_out_bin);
+            }
+
+            auto& v_rev = reads_per_region_rc[i];
+            for (read_realignment_t& rr : v_rev) {
+                char line[16]; // each line is 16 bytes
+                std::string cigar = cigar_array_to_str(rr.cigar_len, rr.cigar);
+                if (cigar_ids.count(cigar) == 0) cigar_ids[cigar] = cigar_ids.size();
+                uint32_t cigar_id = cigar_ids[cigar];
+                write_alignment_to_bytes(line, i, read_ids[rr.read], cigar_id, rr.offset_start, rr.rc, rr.score);
+                fwrite(line, 1, 16, scores_file_out_bin);
+            }
+        }
+
         std::ofstream cigar_map_out(workdir + "/cigars-map");
         for (auto& e : cigar_ids) {
             cigar_map_out << e.second << " " << e.first << std::endl;
@@ -2044,8 +2148,10 @@ int main(int argc, char* argv[]) {
 
     /* === COMPUTE INTEGRATIONS === */
 
-    std::unordered_set<bam1_t*> already_used;
-    std::ofstream bp_seq_out(workdir + "/bp_seqs.fa");
+    google::dense_hash_set<std::string> already_used;
+    already_used.set_empty_key("");
+
+    std::ofstream host_bp_seq_out(workdir + "/host_bp_seqs.fa"), virus_bp_seq_out(workdir + "/virus_bp_seqs.fa");
 
     auto region_score_cmp = [](const region_score_t& r1, const region_score_t& r2) {
         if (r1.score == r2.score) return r1.id < r2.id;
@@ -2058,12 +2164,16 @@ int main(int argc, char* argv[]) {
         std::pair<int, int> score_and_reads = compute_region_score(region, false, already_used);
         int score = score_and_reads.first;
         int reads = score_and_reads.second;
-        if (score > 0) region_scores.push(region_score_t(region_score_id++, region, true, score, reads));
+        if (score > 0) {
+            region_scores.push(region_score_t(region_score_id++, region, true, score, reads));
+        }
 
         score_and_reads = compute_region_score(region, true, already_used);
         score = score_and_reads.first;
         reads = score_and_reads.second;
-        if (score > 0) region_scores.push(region_score_t(region_score_id++, region, false, score, reads));
+        if (score > 0) {
+            region_scores.push(region_score_t(region_score_id++, region, false, score, reads));
+        }
     }
 
     virus_reads_seqs.push_back(read_seq_t());
@@ -2074,7 +2184,7 @@ int main(int argc, char* argv[]) {
 
         std::vector<read_realignment_t> kept_host_read_realignments, kept_virus_read_realignments;
         std::pair<region_t*, bool> best_virus_region;
-        google::dense_hash_map<std::string, int> dedup_qnames;
+        google::dense_hash_map<std::string, std::vector<std::string> > dedup_qnames;
         while (!region_scores.empty()) {
 
             /* === VIRUS REALIGNMENT === */
@@ -2090,7 +2200,7 @@ int main(int argc, char* argv[]) {
                     reads_per_region[best_region_score.region->id] : reads_per_region_rc[best_region_score.region->id];
             host_read_realignments.erase(
                     std::remove_if(host_read_realignments.begin(), host_read_realignments.end(), [&already_used](read_realignment_t& ras) {
-                        return already_used.count(ras.read);
+                        return already_used.count(bam_get_qname(ras.read));
                     }),
                     host_read_realignments.end());
             best_region_score.reads = host_read_realignments.size();
@@ -2168,13 +2278,17 @@ int main(int argc, char* argv[]) {
         region_score_t best_region_score = region_scores.top();
         region_t* best_region = best_region_score.region;
         bool host_region_fwd = best_region_score.fwd;
-        if (best_region_score.score == 0) {
-            std::cerr << "REMAINING REGIONS HAVE SCORE 0" << std::endl;
+        if (best_region_score.score <= 100) { // TODO: use read len instead
+            std::cerr << "REMAINING REGIONS HAVE LOW SCORE." << std::endl;
             break;
         }
 
         for (read_realignment_t& rr : kept_host_read_realignments) {
-            already_used.insert(rr.read);
+            std::string qname = bam_get_qname(rr.read);
+            already_used.insert(qname);
+            for (std::string dup_qname : dedup_qnames[qname]) {
+                already_used.insert(dup_qname);
+            }
         }
 
         std::cerr << "HOST READS: " << kept_host_read_realignments.size() << std::endl;
@@ -2198,9 +2312,9 @@ int main(int argc, char* argv[]) {
         std::vector<double> host_score_ratios;
         for (read_realignment_t& rr : kept_host_read_realignments) {
             host_score_ratios.push_back(rr.score/double(rr.offset_end-rr.offset_start+1));
-            reads_w_dups += dedup_qnames[bam_get_qname(rr.read)];
+            reads_w_dups += dedup_qnames[bam_get_qname(rr.read)].size();
             if (uniquely_aligned.count(bam_get_qname(rr.read))) {
-                unique_reads_w_dups += dedup_qnames[bam_get_qname(rr.read)];
+                unique_reads_w_dups += dedup_qnames[bam_get_qname(rr.read)].size();
             }
         }
 
@@ -2258,11 +2372,16 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        bp_seq_out << ">" << virus_integration_id << std::endl;
+        host_bp_seq_out << ">" << virus_integration_id << std::endl;
         char out_region[10000];
         strncpy(out_region, chrs[contig_id2name[host_bp.contig_id]].first+host_bp.min_pos, host_bp.max_pos-host_bp.min_pos);
         out_region[host_bp.max_pos-host_bp.min_pos] = '\0';
-        bp_seq_out << out_region << std::endl;
+        host_bp_seq_out << out_region << std::endl;
+
+        virus_bp_seq_out << ">" << virus_integration_id << std::endl;
+        strncpy(out_region, chrs[contig_id2name[virus_bp.contig_id]].first+virus_bp.min_pos, virus_bp.max_pos-virus_bp.min_pos);
+        out_region[virus_bp.max_pos-virus_bp.min_pos] = '\0';
+        virus_bp_seq_out << out_region << std::endl;
 
         virus_integration_t v_int(best_region->contig_id, host_bp, virus_bp, best_region_score.reads, split_reads,
                                   reads_w_dups, unique_reads_w_dups, best_region_score.score, mw_p_value, ks_p_value,
@@ -2270,7 +2389,7 @@ int main(int argc, char* argv[]) {
                                   host_coverage_relaxed, virus_coverage_relaxed);
         std::cout << v_int.to_str() << std::endl;
 
-        samFile* writer = open_bam_writer(workdir+"/readsx", std::to_string(virus_integration_id)+".bam", host_and_virus_file->header);
+        samFile* writer = open_bam_writer(workdir+"/readsx", std::to_string(v_int.id)+".bam", host_and_virus_file->header);
         for (read_realignment_t& rr : kept_virus_read_realignments) {
             // we duplicated viruses to deal with breakpoints across the border - scale back those alignment to original virus
             int virus_len = virus_names[contig_id2name[virus_bp.contig_id]];
@@ -2292,12 +2411,13 @@ int main(int argc, char* argv[]) {
         std::cerr << "INTEGRATION ID: " << v_int.id << std::endl;
         std::cerr << "ALREADY USED: " << already_used.size() << std::endl << std::endl;
 
-        region_scores.pop();
-        std::cerr << "REMAINING REGIONS: " << region_scores.size() << std::endl;
+//        region_scores.pop();
+//        std::cerr << "REMAINING REGIONS: " << region_scores.size() << std::endl;
     }
 
     /* ==== */
 
-    bp_seq_out.close();
+    host_bp_seq_out.close();
+    virus_bp_seq_out.clear();
     close_samFile(host_and_virus_file);
 }

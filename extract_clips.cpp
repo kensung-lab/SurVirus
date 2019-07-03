@@ -38,8 +38,8 @@ bam1_t* add_to_queue(std::deque<bam1_t*>& q, bam1_t* o, int size_limit) {
     return t;
 }
 
-void categorize(int id, std::string contig, std::string bam_fname, int target_len, std::vector<bam1_t*>* lc_anchors,
-                std::vector<bam1_t*>* rc_anchors) {
+void extract(int id, std::string contig, std::string bam_fname, int target_len, std::vector<bam1_t *> *lc_anchors,
+             std::vector<bam1_t *> *rc_anchors) {
 
     open_samFile_t* bam_file_open = open_samFile(bam_fname.data());
 
@@ -56,8 +56,6 @@ void categorize(int id, std::string contig, std::string bam_fname, int target_le
 
     hts_itr_t* iter = sam_itr_querys(idx, header, region);
     bam1_t* read = bam_init1();
-
-    std::unordered_map<disc_type_t, samFile*> writers;
 
     std::deque<bam1_t*> two_way_buffer, forward_buffer;
 
@@ -96,21 +94,6 @@ void categorize(int id, std::string contig, std::string bam_fname, int target_le
     }
 
     close_samFile(bam_file_open);
-}
-
-std::string print_fq(bam1_t* r) {
-    std::stringstream ss;
-    ss << "@" << bam_get_qname(r) << "\n";
-    std::string seq = get_sequence(r);
-    if (bam_is_rev(r)) get_rc(seq);
-    ss << seq << "\n";
-    ss << "+" << "\n";
-    for (int i = 0; i < r->core.l_qseq; i++) {
-        int idx = bam_is_rev(r) ? r->core.l_qseq-i-1 : i;
-        ss << (char) (bam_get_qual(r)[idx] + 33);
-    }
-    ss << std::endl;
-    return ss.str();
 }
 
 int main(int argc, char* argv[]) {
@@ -158,7 +141,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::future<void> > futures;
     for (int i = 0; i < header->n_targets; i++) {
         bool is_virus = virus_names.count(header->target_name[i]);
-        std::future<void> future = thread_pool.push(categorize, header->target_name[i], bam_fname, header->target_len[i],
+        std::future<void> future = thread_pool.push(extract, header->target_name[i], bam_fname, header->target_len[i],
                                                     is_virus ? &lc_virus_anchors : &lc_host_anchors,
                                                     is_virus ? &rc_virus_anchors : &rc_host_anchors);
         futures.push_back(std::move(future));
@@ -178,13 +161,13 @@ int main(int argc, char* argv[]) {
         int ok = sam_write1(virus_anchor_writer, header, anchor);
         if (ok < 0) throw "Failed to write to " + std::string(virus_anchor_writer->fn);
         virus_clip_out << ">" << bam_get_qname(anchor) << "_L_" << (anchor->core.flag & BAM_FREAD1 ? "1" : "2") << "\n";
-        virus_clip_out << get_clip(anchor) << "\n";
+        virus_clip_out << get_left_clip(anchor) << "\n";
     }
     for (bam1_t* anchor : rc_virus_anchors) {
         int ok = sam_write1(virus_anchor_writer, header, anchor);
         if (ok < 0) throw "Failed to write to " + std::string(virus_anchor_writer->fn);
         virus_clip_out << ">" << bam_get_qname(anchor) << "_R_" << (anchor->core.flag & BAM_FREAD1 ? "1" : "2") << "\n";
-        virus_clip_out << get_clip(anchor) << "\n";
+        virus_clip_out << get_right_clip(anchor) << "\n";
     }
     sam_close(virus_anchor_writer);
     virus_clip_out.close();
@@ -195,13 +178,13 @@ int main(int argc, char* argv[]) {
         int ok = sam_write1(host_anchor_writer, header, anchor);
         if (ok < 0) throw "Failed to write to " + std::string(host_anchor_writer->fn);
         host_clip_out << ">" << bam_get_qname(anchor) << "_L_" << (anchor->core.flag & BAM_FREAD1 ? "1" : "2") << "\n";
-        host_clip_out << get_clip(anchor) << "\n";
+        host_clip_out << get_left_clip(anchor) << "\n";
     }
     for (bam1_t* anchor : rc_host_anchors) {
         int ok = sam_write1(host_anchor_writer, header, anchor);
         if (ok < 0) throw "Failed to write to " + std::string(host_anchor_writer->fn);
         host_clip_out << ">" << bam_get_qname(anchor) << "_R_" << (anchor->core.flag & BAM_FREAD1 ? "1" : "2") << "\n";
-        host_clip_out << get_clip(anchor) << "\n";
+        host_clip_out << get_right_clip(anchor) << "\n";
     }
     sam_close(host_anchor_writer);
     host_clip_out.close();

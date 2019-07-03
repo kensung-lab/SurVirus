@@ -16,14 +16,6 @@ extern int MAX_READ_SUPPORTED;
 
 int get_mate_endpos(bam1_t* r);
 
-typedef uint8_t disc_type_t;
-static struct disc_types_t {
-    disc_type_t UM, DC, SS, OW, LI, SI;
-    size_t n_types = 6;
-
-    disc_types_t() : UM(1), DC(2), SS(3), OW(4), LI(5), SI(6) {}
-} DISC_TYPES;
-
 bool is_unmapped(bam1_t* r) {
     return r->core.flag & BAM_FUNMAP;
 }
@@ -252,14 +244,18 @@ char get_base(const uint8_t* seq, int i) {
     return nucl2chr[bam_seqi(seq, i)];
 }
 
-int get_avg_qual(bam1_t* r, bool aligned_only = true) {
+int get_avg_qual(bam1_t* r, int start, int end) {
+    if (start >= end) return 0;
     int q = 0;
-    int start = aligned_only ? get_left_clip_len(r) : 0;
-    int end = r->core.l_qseq - (aligned_only ? get_right_clip_len(r) : 0);
     for (int i = start; i < end; i++) {
         q += bam_get_qual(r)[i];
     }
     return q/(end-start);
+}
+int get_avg_qual(bam1_t* r, bool aligned_only = true) {
+    int start = aligned_only ? get_left_clip_len(r) : 0;
+    int end = r->core.l_qseq - (aligned_only ? get_right_clip_len(r) : 0);
+    return get_avg_qual(r, start, end);
 }
 
 bool is_poly_ACGT(bam1_t* r, bool aligned_only = false) {
@@ -330,15 +326,13 @@ std::string get_sequence(bam1_t* r, bool original_seq = false) { // if original_
     return std::string(seq);
 }
 
-std::string get_clip(bam1_t* read) {
+std::string get_left_clip(bam1_t* read) {
     std::string seq = get_sequence(read);
-    if (is_left_clipped(read)) {
-        return seq.substr(0, get_left_clip_len(read));
-    } else if (is_right_clipped(read)) {
-        return seq.substr(seq.length()- get_right_clip_len(read)-1, get_right_clip_len(read));
-    } else {
-        return "";
-    }
+    return seq.substr(0, get_left_clip_len(read));
+}
+std::string get_right_clip(bam1_t* read) {
+    std::string seq = get_sequence(read);
+    return seq.substr(seq.length()- get_right_clip_len(read)-1, get_right_clip_len(read));
 }
 
 std::pair<int, const uint32_t*> cigar_str_to_array(std::string& cigar_str) {

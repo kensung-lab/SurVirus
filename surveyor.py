@@ -25,7 +25,7 @@ cmd_parser.add_argument('--coveredRegionsBed', default='',
                         help='In case only a few regions of the genome are covered by reads, this directs SurVirus'
                              'on where to sample reads. In case --wgs is not used and this is not provided,'
                              'SurVirus will compute such file by itself.')
-cmd_parser.add_argument('--minClipSize', type=int, default=18, help='Min size for a clip to be considered.')
+cmd_parser.add_argument('--minClipSize', type=int, default=30, help='Min size for a clip to be considered.')
 cmd_parser.add_argument('--maxSCDist', type=int, default=10, help='Max SC distance.')
 cmd_args = cmd_parser.parse_args()
 
@@ -37,7 +37,7 @@ bam_files = [pysam.AlignmentFile(bam_name) for bam_name in bam_names]
 
 config_file = open(cmd_args.workdir + "/config.txt", "w")
 config_file.write("threads %d\n" % cmd_args.threads)
-config_file.write("min_sv_len %d\n" % cmd_args.minClipSize)
+config_file.write("min_sc_size %d\n" % cmd_args.minClipSize)
 config_file.write("max_sc_dist %d\n" % cmd_args.maxSCDist)
 config_file.close();
 
@@ -213,9 +213,9 @@ for file_index, bam_file in enumerate(bam_files):
 
     # map virus clips
     bwa_aln_cmd = "%s aln -t %d %s %s/virus-clips.fa -f %s/virus-clips.sai" \
-                  % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace)
+                  % (cmd_args.bwa, cmd_args.threads, cmd_args.host_reference, bam_workspace, bam_workspace)
     bwa_samse_cmd = "%s samse %s %s/virus-clips.sai %s/virus-clips.fa | %s view -b -F 2304 > %s/virus-clips.full.bam" \
-                    % (cmd_args.bwa, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace, cmd_args.samtools, bam_workspace)
+                    % (cmd_args.bwa, cmd_args.host_reference, bam_workspace, bam_workspace, cmd_args.samtools, bam_workspace)
     execute(bwa_aln_cmd)
     execute(bwa_samse_cmd)
 
@@ -228,7 +228,7 @@ for file_index, bam_file in enumerate(bam_files):
     execute(dump_unmapped_fa)
 
     bwa_mem_cmd = "%s mem -t %d %s %s/virus-clips.unmapped.fa | %s view -b -F 2308 > %s/virus-clips.mem.bam" \
-              % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
+              % (cmd_args.bwa, cmd_args.threads, cmd_args.host_reference, bam_workspace,
                  cmd_args.samtools, bam_workspace)
     execute(bwa_mem_cmd)
 
@@ -238,13 +238,10 @@ for file_index, bam_file in enumerate(bam_files):
 
     # map host clips
     bwa_aln_cmd = "%s aln -t %d %s %s/host-clips.fa -f %s/host-clips.sai" \
-                  % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace)
+                  % (cmd_args.bwa, cmd_args.threads, cmd_args.virus_reference, bam_workspace, bam_workspace)
     bwa_samse_cmd = "%s samse %s %s/host-clips.sai %s/host-clips.fa | %s view -b -F 2304 > %s/host-clips.full.bam" \
-                    % (cmd_args.bwa, cmd_args.host_and_virus_reference, bam_workspace, bam_workspace, cmd_args.samtools,
+                    % (cmd_args.bwa, cmd_args.virus_reference, bam_workspace, bam_workspace, cmd_args.samtools,
                        bam_workspace)
-    # bwa_cmd = "%s mem -t %d -h %d %s %s/host-clips.fa | %s view -b -F 2308 > %s/host-clips.bam" \
-    #           % (cmd_args.bwa, cmd_args.threads, n_viruses, cmd_args.host_and_virus_reference, bam_workspace,
-    #              cmd_args.samtools, bam_workspace)
     execute(bwa_aln_cmd)
     execute(bwa_samse_cmd)
 
@@ -257,7 +254,7 @@ for file_index, bam_file in enumerate(bam_files):
     execute(dump_unmapped_fa)
 
     bwa_mem_cmd = "%s mem -t %d %s %s/host-clips.unmapped.fa | %s view -b -F 2308 > %s/host-clips.mem.bam" \
-                  % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
+                  % (cmd_args.bwa, cmd_args.threads, cmd_args.virus_reference, bam_workspace,
                      cmd_args.samtools, bam_workspace)
     execute(bwa_mem_cmd)
 
@@ -312,11 +309,11 @@ execute(filter_cmd)
 
 print "Finding alternative locations..."
 
-bwa_cmd = "%s mem -t %d -h 1000 %s %s/bp_seqs.fa | %s view -b -F 2308 > %s/bp_seqs.bam" \
+bwa_cmd = "%s mem -t %d -h 1000 %s %s/host_bp_seqs.fa | %s view -b -F 2308 > %s/host_bp_seqs.bam" \
           % (cmd_args.bwa, cmd_args.threads, cmd_args.host_reference, cmd_args.workdir, cmd_args.samtools, cmd_args.workdir)
 execute(bwa_cmd)
 
-with pysam.AlignmentFile("%s/bp_seqs.bam" % cmd_args.workdir) as bp_seqs_bam, \
+with pysam.AlignmentFile("%s/host_bp_seqs.bam" % cmd_args.workdir) as bp_seqs_bam, \
         open("%s/results.alternative.txt" % cmd_args.workdir, 'w') as altf:
     for r in bp_seqs_bam.fetch(until_eof=True):
         if not r.has_tag('XA'): continue

@@ -23,7 +23,7 @@ file(GLOB ALGOLIB_SRC "alglib/*.h" "alglib/*.cpp" )
 set(REMAPPER_SRC ${ALGOLIB_SRC} libs/ssw.c libs/ssw_cpp.cpp remapper.cpp sam_utils.h config.h libs/cptl_stl.h cluster.h)
 add_executable(remapper ${REMAPPER_SRC})
 
-set(FILTER_SRC filter.cpp)
+set(FILTER_SRC libs/ssw.c libs/ssw_cpp.cpp filter.cpp)
 add_executable(filter ${FILTER_SRC})
 
 set(GET_REALIGNMENTS_FOR_QNAME get-realignments-for-qname.cpp)

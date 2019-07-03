@@ -36,31 +36,33 @@ std::string get_sequence(bam1_t* r, bool original_seq = false) { // if original_
 
 int main(int argc, char* argv[]) {
 
-    std::string workspace = argv[1];
+    std::string workdir = argv[1];
     std::string target_qname = argv[2];
 
-    std::string scores_file_path = workspace + "/reads.scores.bin";
+    bool print_all = argc > 3;
+
+    std::string scores_file_path = workdir + "/reads.scores.bin";
     FILE* scores_file_in_bin = fopen(scores_file_path.c_str(), "rb");
     if (scores_file_in_bin) {
-        std::set<int> target_read_ids;
-        std::ifstream qnames_map_in(workspace + "/qnames-map");
+        std::unordered_map<int, std::string> target_read_ids;
+        std::ifstream qnames_map_in(workdir + "/qnames-map");
         int i; std::string qname, seq;
         while (qnames_map_in >> i >> qname >> seq) {
-            if (qname == target_qname) {
-                target_read_ids.insert(i);
+            if (print_all || qname == target_qname) {
+                target_read_ids[i] = qname;
             }
         }
         qnames_map_in.close();
 
         std::unordered_map<uint32_t, std::string> id_to_cigar;
-        std::ifstream cigars_map_in(workspace + "/cigars-map");
+        std::ifstream cigars_map_in(workdir + "/cigars-map");
         std::string cigar_str;
         while (cigars_map_in >> i >> cigar_str) {
             id_to_cigar[i] = cigar_str;
         }
 
         std::unordered_map<uint32_t, std::string> id_to_region;
-        std::ifstream regions_map_in(workspace + "/host-regions");
+        std::ifstream regions_map_in(workdir + "/host-regions");
         std::string chr, start, end;
         while (regions_map_in >> i >> chr >> start >> end) {
             id_to_region[i] = chr + ":" + start + "-" + end;
@@ -70,15 +72,15 @@ int main(int argc, char* argv[]) {
         while (fread(line, 16, 1, scores_file_in_bin)) {
             uint32_t region_id = *((uint32_t *) (line + 0));
             uint32_t read_id = *((uint32_t *) (line + 4));
-            if (!target_read_ids.count(read_id)) continue;
+            if (!print_all && !target_read_ids.count(read_id)) continue;
 
             uint32_t cigar_id = *((uint32_t *) (line + 8));
             bool is_rc = cigar_id & 0x80000000;
             std::string cigar_str = id_to_cigar[cigar_id & 0x7FFFFFFF];
             uint16_t offset_start = *((uint16_t *) (line + 12));
             uint16_t score = *((uint16_t *) (line + 14));
-            std::cout << id_to_region[region_id] << " " << offset_start << " " << " " << cigar_str << " " <<
-            score << " " << is_rc << std::endl;
+            std::cout << id_to_region[region_id] << " " << target_read_ids[read_id] << " " << offset_start << " " <<
+            cigar_str << " " << score << " " << is_rc << std::endl;
         }
         fclose(scores_file_in_bin);
     }

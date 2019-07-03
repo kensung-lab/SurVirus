@@ -70,16 +70,7 @@ config_t parse_config(std::string file) {
 
     config_t config;
     config.threads = stoi(config_params["threads"]);
-//    if (config_params.count("rmsk")) {
-//        config.rmsk_fname = config_params["rmsk"];
-//    }
-//    if (config_params.count("simple_rep")) {
-//        config.simple_rep_fname = config_params["simple_rep"];
-//    }
-
-//    config.avg_depth = stoi(config_params["avg_depth"]);
-//    config.min_is = stoi(config_params["min_is"]);
-    config.min_sc_size = stoi(config_params["min_sv_len"]); // TODO: change into min_sc_size
+    config.min_sc_size = stoi(config_params["min_sc_size"]);
     config.max_sc_dist = stoi(config_params["max_sc_dist"]);
     return config;
 };
