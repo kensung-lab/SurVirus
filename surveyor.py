@@ -36,7 +36,7 @@ def execute(cmd):
     os.system(cmd)
 
 
-bam_names = cmd_args.input_files.split(';')
+bam_names = cmd_args.input_files.split(',')
 if cmd_args.fq:
     if len(bam_names) != 2:
         print "Two semi-colon separated fastq files are required."
