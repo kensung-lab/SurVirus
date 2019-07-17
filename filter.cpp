@@ -8,6 +8,7 @@
 
 KSEQ_INIT(int, read)
 
+#include "config.h"
 #include "libs/ssw.h"
 #include "libs/ssw_cpp.h"
 
@@ -42,6 +43,7 @@ struct call_t {
     double pval_mwu, pval_ks, host_pbs, virus_pbs;
     double host_cov, virus_cov;
     bool removed = false;
+    int paired_with = -1;
 
     call_t(std::string& line) {
         std::stringstream ssin(line);
@@ -58,10 +60,13 @@ struct call_t {
 
     double coverage() { return (host_cov + virus_cov)/2; }
 
+    bool is_paired() { return paired_with >= 0; }
+
     std::string to_string() {
         std::stringstream ssout;
         ssout << "ID=" << id << " " << host_bp.to_string() << " " << virus_bp.to_string() << " READS=" << reads << " SPLIT_READS=" << split_reads;
         ssout << " PVAL=" << pval() << " HOST_PBS=" << host_pbs << " COVERAGE=" << coverage();
+        if (is_paired()) ssout << " PAIRED WITH ID=" << paired_with;
         return ssout.str();
     }
 };
@@ -95,11 +100,13 @@ void print_calls(std::vector<call_t>& calls) {
 
 int main(int argc, char* argv[]) {
 
-    std::string workspace = argv[1];
+    std::string workdir = argv[1];
 
-    std::ifstream fin(workspace + "/results.txt");
+    config_t config = parse_config(workdir + "/config.txt");
 
-    std::vector<double> args;
+    std::ifstream fin(workdir + "/results.txt");
+
+    std::vector<std::string> args;
     bool print_rejected = false, accept_clipped = false;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--print-rejected") == 0) {
@@ -107,18 +114,32 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--accept-all-clipped") == 0) {
             accept_clipped = true;
         } else {
-            args.push_back(std::stod(argv[i]));
+            args.push_back(argv[i]);
         }
     }
 
     double min_pval = 0.001;
-    if (args.size() >= 1) min_pval = args[0];
+    if (args.size() >= 1) min_pval = std::stod(args[0]);
+
+    double min_reads = 4;
+    if (args.size() >= 2) min_reads = std::stoi(args[1]);
 
     double min_host_pbs = 0.8;
-    if (args.size() >= 2) min_host_pbs = args[1];
+    if (args.size() >= 3) min_host_pbs = std::stod(args[2]);
 
     double min_cov_for_accept = 0.5;
-    if (args.size() >= 3) min_cov_for_accept = args[2];
+    if (args.size() >= 4) min_cov_for_accept = std::stod(args[3]);
+
+
+    // read host and virus sequences
+    std::string host_bp_seqs_fname = workdir + "/host_bp_seqs.fa", virus_bp_seqs_fname = workdir + "/virus_bp_seqs.fa";
+    FILE* host_bp_fasta = fopen(host_bp_seqs_fname.c_str(), "r"), *virus_bp_fasta = fopen(virus_bp_seqs_fname.c_str(), "r");
+    kseq_t* hseq = kseq_init(fileno(host_bp_fasta)), *vseq = kseq_init(fileno(virus_bp_fasta));
+    std::vector<std::pair<std::string, std::string> > host_virus_bp_seqs;
+    while (kseq_read(hseq) >= 0 && kseq_read(vseq) >= 0) {
+        host_virus_bp_seqs.push_back({hseq->seq.s, vseq->seq.s});
+    }
+
 
     std::vector<call_t> accepted_calls, rejected_calls;
     std::string line;
@@ -128,6 +149,10 @@ int main(int argc, char* argv[]) {
         bool accept = true;
         if (call.pval() < min_pval) accept = false;
         if (call.host_pbs < min_host_pbs) accept = false;
+        if (call.reads < min_reads) accept = false;
+        if (host_virus_bp_seqs[call.id].first.length() < config.read_len || host_virus_bp_seqs[call.id].second.length() < config.read_len) {
+            accept = false;
+        }
 
         if (call.coverage() >= min_cov_for_accept) accept = true;
         if (accept_clipped && call.split_reads > 0) accept = true;
@@ -141,14 +166,14 @@ int main(int argc, char* argv[]) {
 
 
     // find pairs
-    std::vector<bool> paired(accepted_calls.size(), false);
-
     for (int i = 0; i < accepted_calls.size(); i++) {
         call_t a_call1 = accepted_calls[i];
 
         int pair_j = -1, min_dist = INT32_MAX;
         for (int j = i+1; j < accepted_calls.size(); j++) {
             call_t a_call2 = accepted_calls[j];
+            if (a_call2.is_paired()) continue;
+
             int dist = pair_dist(a_call1, a_call2);
             if (abs(dist) < min_dist) {
                 pair_j = j;
@@ -157,17 +182,19 @@ int main(int argc, char* argv[]) {
         }
 
         if (pair_j != -1) {
-            paired[i] = paired[pair_j] = true;
+            accepted_calls[i].paired_with = accepted_calls[pair_j].id;
+            accepted_calls[pair_j].paired_with = accepted_calls[i].id;
         }
     }
 
     for (int i = 0; i < accepted_calls.size(); i++) {
-        if (paired[i]) continue;
-
         call_t a_call = accepted_calls[i];
+        if (a_call.is_paired()) continue;
 
         int pair_j = -1, min_dist = INT32_MAX;
         for (int j = 0; j < rejected_calls.size(); j++) {
+            if (rejected_calls[j].is_paired()) continue;
+
             call_t r_call = rejected_calls[j];
             int dist = pair_dist(a_call, r_call);
             if (abs(dist) < min_dist) {
@@ -177,22 +204,14 @@ int main(int argc, char* argv[]) {
         }
 
         if (pair_j != -1) {
+            a_call.paired_with = rejected_calls[pair_j].id;
+            rejected_calls[pair_j].paired_with = a_call.id;
             accepted_calls.push_back(rejected_calls[pair_j]);
-            paired[i] = true;
-            paired.push_back(true);
         }
     }
 
 
     // find duplicates
-    std::string host_bp_seqs_fname = workspace + "/host_bp_seqs.fa", virus_bp_seqs_fname = workspace + "/virus_bp_seqs.fa";
-    FILE* host_bp_fasta = fopen(host_bp_seqs_fname.c_str(), "r"), *virus_bp_fasta = fopen(virus_bp_seqs_fname.c_str(), "r");
-    kseq_t* hseq = kseq_init(fileno(host_bp_fasta)), *vseq = kseq_init(fileno(virus_bp_fasta));
-    std::vector<std::pair<std::string, std::string> > host_virus_bp_seqs;
-    while (kseq_read(hseq) >= 0 && kseq_read(vseq) >= 0) {
-        host_virus_bp_seqs.push_back({hseq->seq.s, vseq->seq.s});
-    }
-
     StripedSmithWaterman::Aligner aligner(1, 4, 6, 1, false);
     StripedSmithWaterman::Filter filter;
     for (int j = 0; j < accepted_calls.size(); j++) {

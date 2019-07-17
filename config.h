@@ -6,58 +6,15 @@
 #include <string>
 #include <unordered_map>
 
-int MIN_MAPQ = 0;
 int MIN_CLIP_LEN = 5;
-int MIN_CLIP_CONSENSUS_LEN = 15;
-int MIN_DC_MAPQ = 20;
-double MAX_SEQ_ERROR = 0.04;
 
 int MAX_READ_SUPPORTED = 10000;
 
 struct config_t {
     int threads;
-    std::string rmsk_fname = "", simple_rep_fname = "";
     int min_sc_size, max_sc_dist;
+    int read_len;
 };
-
-struct repeat_t {
-    std::string chr;
-    int start, end;
-    std::string type;
-
-    repeat_t() {}
-    repeat_t(std::string& line) {
-        char temp[100];
-        std::stringstream ss(line);
-
-        for (int i = 0; i < 5; i++) {
-            ss >> temp;
-        }
-        ss >> chr >> start >> end;
-
-        ss >> temp >> temp;
-        ss >> type >> temp;
-        type += "-" + std::string(temp);
-    }
-};
-
-struct simple_repeat_t {
-    std::string chr;
-    int start, end;
-    int period;
-
-    simple_repeat_t() {}
-    simple_repeat_t(std::string& line) {
-        char temp[100];
-        std::stringstream ss(line);
-
-        ss >> temp;
-        ss >> chr >> start >> end;
-        ss >> temp;
-        ss >> period;
-    }
-};
-
 
 config_t parse_config(std::string file) {
     std::unordered_map<std::string, std::string> config_params;
@@ -72,6 +29,7 @@ config_t parse_config(std::string file) {
     config.threads = stoi(config_params["threads"]);
     config.min_sc_size = stoi(config_params["min_sc_size"]);
     config.max_sc_dist = stoi(config_params["max_sc_dist"]);
+    config.read_len = stoi(config_params["read_len"]);
     return config;
 };
 
@@ -92,7 +50,6 @@ stats_t parse_stats(std::string file) {
     stats_t stats;
     stats.min_is = stoi(config_params["min_is"]);
     stats.max_is = stoi(config_params["max_is"]);
-//    stats.read_len = stoi(config_params["read_len"]);
     return stats;
 }
 

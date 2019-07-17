@@ -8,7 +8,7 @@ GEN_DIST_SIZE = 10000
 MAX_ACCEPTABLE_IS = 20000
 
 cmd_parser = argparse.ArgumentParser(description='SurVirus, a virus integration caller.')
-cmd_parser.add_argument('bam_files', help='Input bam files, separated by a semi-colon.')
+cmd_parser.add_argument('input_files', help='Input bam files, separated by a semi-colon.')
 cmd_parser.add_argument('workdir', help='Working directory for SurVirus to use.')
 cmd_parser.add_argument('host_reference', help='Reference of the host organism in FASTA format.')
 cmd_parser.add_argument('virus_reference', help='References of a list of viruses in FASTA format.')
@@ -27,9 +27,33 @@ cmd_parser.add_argument('--coveredRegionsBed', default='',
                              'SurVirus will compute such file by itself.')
 cmd_parser.add_argument('--minClipSize', type=int, default=30, help='Min size for a clip to be considered.')
 cmd_parser.add_argument('--maxSCDist', type=int, default=10, help='Max SC distance.')
+cmd_parser.add_argument('--fq', action='store_true', help='Input is in fastq format.')
 cmd_args = cmd_parser.parse_args()
 
-bam_names = cmd_args.bam_files.split(';')
+
+def execute(cmd):
+    print "Executing:", cmd
+    os.system(cmd)
+
+
+bam_names = cmd_args.input_files.split(';')
+if cmd_args.fq:
+    if len(bam_names) != 2:
+        print "Two semi-colon separated fastq files are required."
+        exit(1)
+
+    bwa_cmd = "%s mem -t %d %s %s %s | %s view -b -F 2304 > %s/input.bam" % \
+              (cmd_args.bwa, cmd_args.threads, cmd_args.host_reference, bam_names[0], bam_names[1], cmd_args.samtools, cmd_args.workdir)
+    execute(bwa_cmd)
+
+    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/input.sorted.bam" % cmd_args.workdir, "%s/input.bam" % cmd_args.workdir)
+
+    index_cmd = "%s index %s/input.sorted.bam" % (cmd_args.samtools, cmd_args.workdir)
+    execute(index_cmd)
+
+    bam_names = ["%s/input.sorted.bam" % cmd_args.workdir]
+
+print bam_names
 bam_files = [pysam.AlignmentFile(bam_name) for bam_name in bam_names]
 
 
@@ -39,18 +63,6 @@ config_file = open(cmd_args.workdir + "/config.txt", "w")
 config_file.write("threads %d\n" % cmd_args.threads)
 config_file.write("min_sc_size %d\n" % cmd_args.minClipSize)
 config_file.write("max_sc_dist %d\n" % cmd_args.maxSCDist)
-config_file.close();
-
-
-def execute(cmd):
-    print "Executing:", cmd
-    os.system(cmd)
-
-
-# Find read length
-
-bam_names = cmd_args.bam_files.split(';')
-bam_files = [pysam.AlignmentFile(bam_name) for bam_name in bam_names]
 
 
 # Generate general distribution of insert sizes
@@ -108,6 +120,8 @@ for i in range(1,GEN_DIST_SIZE*2):
     if i % 100000 == 0: print i, "random positions generated."
     random_positions.append(rand_pos_gen.next())
 
+
+max_read_len = 0
 for file_index, bam_file in enumerate(bam_files):
     read_len = 0
     for i, read in enumerate(bam_file.fetch(until_eof=True)):
@@ -166,6 +180,11 @@ for file_index, bam_file in enumerate(bam_files):
         stat_file.write("avg_is %d\n" % mean_is)
         stat_file.write("max_is %d\n" % max_is)
         stat_file.write("read_len %d\n" % read_len)
+
+    max_read_len = max(max_read_len, read_len)
+
+config_file.write("read_len %d\n" % max_read_len)
+config_file.close();
 
 
 print "Regenerating random genomic positions..."
@@ -300,10 +319,10 @@ remapper_cmd = "./remapper %s %s %s %s > %s/results.txt 2> %s/log.txt" \
                   bam_files_and_workspaces, cmd_args.workdir, cmd_args.workdir)
 execute(remapper_cmd)
 
-filter_cmd = "./filter %s > %s/results.t1.txt" % (cmd_args.workdir, cmd_args.workdir)
+filter_cmd = "./filter %s 0 > %s/results.t1.txt" % (cmd_args.workdir, cmd_args.workdir)
 execute(filter_cmd)
 
-filter_cmd = "./filter %s --print-rejected > %s/results.discarded.txt" % (cmd_args.workdir, cmd_args.workdir)
+filter_cmd = "./filter %s 0 --print-rejected > %s/results.discarded.txt" % (cmd_args.workdir, cmd_args.workdir)
 execute(filter_cmd)
 
 
@@ -319,11 +338,15 @@ with pysam.AlignmentFile("%s/host_bp_seqs.bam" % cmd_args.workdir) as bp_seqs_ba
         if not r.has_tag('XA'): continue
 
         xa_regions = r.get_tag('XA').split(';')[:-1]
-        pos = r.reference_start if r.is_reverse else r.reference_end
-        altf.write("ID=%s %s:%c%d\n" % (r.qname, r.reference_name, "-" if r.is_reverse else "+", pos))
+        id, dir = r.qname.split("_")
+        is_rev = r.is_reverse and dir == "R" or not r.is_reverse and dir == "L"
+        pos = r.reference_start if is_rev else r.reference_end
+        altf.write("ID=%s %s:%c%d\n" % (id, r.reference_name, "-" if is_rev else "+", pos))
         for xa_region in xa_regions:
             xa_region_split = xa_region.split(',')
             pos = int(xa_region_split[1])
-            if pos > 0: pos += r.query_length
-            altf.write("ID=%s %s:%c%d\n" % (r.qname, xa_region_split[0], "+" if pos > 0 else "-", abs(pos)))
+            is_rev = pos < 0 and dir == "R" or pos > 0 and dir == "L"
+            pos = abs(pos)
+            if not is_rev: pos += r.query_length
+            altf.write("ID=%s %s:%c%d\n" % (id, xa_region_split[0], "-" if is_rev else "+", pos))
 
