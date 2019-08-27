@@ -149,8 +149,9 @@ int main(int argc, char* argv[]) {
         bool accept = true;
         if (call.pval() < min_pval) accept = false;
         if (call.host_pbs < min_host_pbs) accept = false;
-        if (call.reads < min_reads) accept = false;
-        if (host_virus_bp_seqs[call.id].first.length() < config.read_len || host_virus_bp_seqs[call.id].second.length() < config.read_len) {
+        if (call.reads < min_reads-1 || (call.reads == min_reads-1 && call.split_reads == 0)) accept = false;
+//        if (call.reads < min_reads) accept = false;
+        if (host_virus_bp_seqs[call.id].first.length() < config.read_len/2 || host_virus_bp_seqs[call.id].second.length() < config.read_len/2) {
             accept = false;
         }
 

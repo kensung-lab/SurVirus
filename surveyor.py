@@ -53,7 +53,6 @@ if cmd_args.fq:
 
     bam_names = ["%s/input.sorted.bam" % cmd_args.workdir]
 
-print bam_names
 bam_files = [pysam.AlignmentFile(bam_name) for bam_name in bam_names]
 
 

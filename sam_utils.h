@@ -142,6 +142,7 @@ bool is_poly_ACGT(const char* seq, int len) {
     return double(maxc)/len >= 0.8;
 }
 
+
 void get_rc(std::string& read) {
     int len = read.length();
     for (int i = 0; i < len/2; i++) {
@@ -178,6 +179,43 @@ std::string get_sequence(bam1_t* r, bool original_seq = false) { // if original_
     seq[r->core.l_qseq] = '\0';
     if (original_seq && bam_is_rev(r)) get_rc(seq, r->core.l_qseq);
     return std::string(seq);
+}
+
+bool is_low_complexity(bam1_t* read, int start, int end) {
+    int count[256];
+    count[0] = 0;
+    for (uint8_t i = 1; i < 16; i*=2) {
+        for (uint8_t j = 1; j < 16; j *= 2) {
+            uint8_t c = (i << 4) | j;
+            count[c] = 0;
+        }
+    }
+
+    const uint8_t* bam_seq = bam_get_seq(read);
+    for (uint8_t i = start+1; i < end; i++) {
+        uint8_t twobases = (bam_seqi(bam_seq, i-1) << 4) | bam_seqi(bam_seq, i);
+        count[int(twobases)]++;
+    }
+
+    char nucl2chr[16];
+    nucl2chr[1] = 'A'; nucl2chr[2] = 'C'; nucl2chr[4] = 'G'; nucl2chr[8] = 'T'; nucl2chr[15] = 'N';
+
+    uint8_t top1 = 0, top2 = 0;
+    for (uint8_t i = 1; i < 16; i*=2) {
+        for (uint8_t j = 1; j < 16; j*=2) {
+            uint8_t c = (i << 4) | j;
+            if (count[c] > count[top1]) {
+                top2 = top1;
+                top1 = c;
+            } else if (count[c] > count[top2]) {
+                top2 = c;
+            }
+        }
+    }
+
+    bool is_lc = count[top1] + count[top2] >= (end-start+1)*0.75;
+//    std::cout << bam_get_qname(read) << " " << get_sequence(read).substr(start, end-start+1) << " " << is_lc << std::endl;
+    return is_lc;
 }
 
 std::string get_left_clip(bam1_t* read) {

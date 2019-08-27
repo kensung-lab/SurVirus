@@ -139,6 +139,7 @@ struct read_realignment_t {
     const uint32_t* cigar;
     uint16_t score;
     bool rc;
+    bool suspicious = false;
 
     read_realignment_t() : read(NULL), offset_start(0), offset_end(0), cigar_len(0), cigar(NULL), score(0), rc(false) {}
     read_realignment_t(bam1_t* read) : read(read), offset_start(0), offset_end(0), cigar_len(0), cigar(NULL), score(0), rc(false) {};
@@ -192,6 +193,13 @@ struct read_seq_t {
     read_seq_t(bam1_t* read, std::string& seq) : read(read), seq(seq), seq_rc(seq) {
         get_rc(seq_rc);
     }
+};
+
+struct window_t {
+    int start, end;
+
+    window_t() : start(0), end(0) {}
+    window_t(int start, int end) : start(start), end(end) {}
 };
 
 char _cigar_int_to_op(uint32_t c) {
@@ -471,14 +479,14 @@ std::string alignment_cigar_to_bam_cigar(std::vector<uint32_t> cigar) {
 
 
 bool accept_alignment(StripedSmithWaterman::Alignment& alignment, std::string& query) {
-    bool poly_ACGT = is_poly_ACGT(query.c_str()+alignment.query_begin, alignment.query_end-alignment.query_begin+1);
+//    bool poly_ACGT = is_poly_ACGT(query.c_str()+alignment.query_begin, alignment.query_end-alignment.query_begin+1);
     bool long_enough = alignment.ref_end-alignment.ref_begin+1 >= 30;
     bool score_enough = alignment.sw_score >= 30;
     uint32_t c0 = alignment.cigar[0], cl = alignment.cigar[alignment.cigar.size()-1];
-    bool left_clipped = cigar_int_to_op(c0) == 'S' && cigar_int_to_len(c0) >= config.max_sc_dist;
-    bool right_clipped = cigar_int_to_op(cl) == 'S' && cigar_int_to_len(cl) >= config.max_sc_dist;
+    bool left_clipped = cigar_int_to_op(c0) == 'S' && cigar_int_to_len(c0) >= config.min_sc_size;
+    bool right_clipped = cigar_int_to_op(cl) == 'S' && cigar_int_to_len(cl) >= config.min_sc_size;
     bool clipped_both_sides = left_clipped && right_clipped;
-    return !poly_ACGT && long_enough && score_enough && !clipped_both_sides;
+    return /*!poly_ACGT &&*/ long_enough && score_enough && !clipped_both_sides;
 };
 
 
@@ -853,7 +861,7 @@ int get_last_max_element(int* v, int len) {
     }
     return max_pos;
 }
-std::pair<int, int> get_accept_window(std::vector<read_realignment_t>& realigned_reads, bool rc, int region_len,
+window_t get_accept_window(std::vector<read_realignment_t>& realigned_reads, bool rc, int region_len,
         google::dense_hash_map<std::string, std::vector<std::string> >& deduped_qnames) {
 
     int clip_positions[100000];
@@ -916,7 +924,7 @@ std::pair<int, int> get_accept_window(std::vector<read_realignment_t>& realigned
         accept_window_end = bp_pos;
         accept_window_start = accept_window_end - global_stats.max_is;
     }
-    return {accept_window_start, accept_window_end};
+    return window_t(accept_window_start, accept_window_end);
 }
 
 
@@ -1123,7 +1131,8 @@ std::vector<read_seq_t> virus_reads_seqs;
 std::pair<int,int> remap_virus_reads_supp(region_t* virus_region, bool vregion_rc, std::vector<uint64_t>& read_seq_ids,
         region_t* host_region, bool hregion_rc, std::vector<read_realignment_t>& host_alignemnts,
         std::vector<read_realignment_t>* virus_read_realignments,
-        StripedSmithWaterman::Aligner& aligner, StripedSmithWaterman::Filter& filter) {
+        StripedSmithWaterman::Aligner& aligner, StripedSmithWaterman::Filter& filter,
+        window_t& host_window, window_t& virus_window) {
 
     std::string region_str = (vregion_rc ? "-" : "+") + virus_region->to_str();
 
@@ -1161,14 +1170,14 @@ std::pair<int,int> remap_virus_reads_supp(region_t* virus_region, bool vregion_r
         virus_read_realignments_local.push_back(rr);
     }
 
-    auto remove_rr = [&virus_region] (read_realignment_t& rr, std::pair<int, int> accept_window, bool rc) {
+    auto remove_rr = [&virus_region] (read_realignment_t& rr, window_t accept_window, bool rc) {
         int MIN_QUAL = 10;
-        bool remove = rr.offset_start < accept_window.first || rr.offset_end > accept_window.second;
+        bool remove = rr.offset_start < accept_window.start || rr.offset_end > accept_window.end;
         if (rr.left_clip_len() > config.max_sc_dist && rr.left_clip_avg_qual() >= MIN_QUAL) {
-            remove |= abs(rr.offset_start - accept_window.first) > config.max_sc_dist;
+            remove |= abs(rr.offset_start - accept_window.start) > config.max_sc_dist;
         }
         if (rr.right_clip_len() > config.max_sc_dist && rr.right_clip_avg_qual() >= MIN_QUAL) {
-            remove |= abs(rr.offset_end - accept_window.second) > config.max_sc_dist;
+            remove |= abs(rr.offset_end - accept_window.end) > config.max_sc_dist;
         }
         return remove;
     };
@@ -1178,15 +1187,15 @@ std::pair<int,int> remap_virus_reads_supp(region_t* virus_region, bool vregion_r
 
     google::dense_hash_set<std::string> to_be_removed;
     to_be_removed.set_empty_key("");
-    std::pair<int,int> host_accept_window = get_accept_window(host_read_realignments_local, hregion_rc, host_region->len(), deduped_qnames);
-    std::pair<int,int> virus_accept_window = get_accept_window(virus_read_realignments_local, vregion_rc, virus_region->len(), deduped_qnames);
+    host_window = get_accept_window(host_read_realignments_local, hregion_rc, host_region->len(), deduped_qnames);
+    virus_window = get_accept_window(virus_read_realignments_local, vregion_rc, virus_region->len(), deduped_qnames);
     for (read_realignment_t& rr : host_read_realignments_local) {
-        if (remove_rr(rr, host_accept_window, hregion_rc)) {
+        if (remove_rr(rr, host_window, hregion_rc)) {
             to_be_removed.insert(bam_get_qname(rr.read));
         }
     }
     for (read_realignment_t& rr : virus_read_realignments_local) {
-        if (remove_rr(rr, virus_accept_window, vregion_rc)) {
+        if (remove_rr(rr, virus_window, vregion_rc)) {
             to_be_removed.insert(bam_get_qname(rr.read));
         }
     }
@@ -1210,7 +1219,7 @@ std::pair<int,int> remap_virus_reads_supp(region_t* virus_region, bool vregion_r
 }
 
 std::pair<region_t*, bool> remap_virus_reads(region_score_t& host_region_score, std::vector<read_realignment_t>& virus_read_realignments,
-        google::dense_hash_map<std::string, bam1_t*>& virus_reads_by_name) {
+        google::dense_hash_map<std::string, bam1_t*>& virus_reads_by_name, window_t& host_window, window_t& virus_window) {
     StripedSmithWaterman::Aligner aligner(1, 4, 6, 1, false);
     StripedSmithWaterman::Filter filter;
 
@@ -1294,12 +1303,11 @@ std::pair<region_t*, bool> remap_virus_reads(region_score_t& host_region_score, 
     std::pair<int, int> best_score = {-1, -1};
     bool is_best_vregion_fwd;
     for (region_t* virus_region : virus_regions) {
-        std::vector<read_realignment_t> a; // TODO remove
+        window_t temp1, temp2;
         std::pair<int, int> score = remap_virus_reads_supp(virus_region, false, read_seq_ids, host_region_score.region, !host_region_score.fwd,
-                host_alignments, &a, aligner, filter);
-        std::vector<read_realignment_t> b; // TODO remove
+                host_alignments, NULL, aligner, filter, temp1, temp2);
         std::pair<int, int> rc_score = remap_virus_reads_supp(virus_region, true, read_seq_ids, host_region_score.region, !host_region_score.fwd,
-                host_alignments, &b, aligner, filter);
+                host_alignments, NULL, aligner, filter, temp1, temp2);
 
         std::pair<int, int> max_score = std::max(score, rc_score);
         if (best_score < max_score) {
@@ -1312,7 +1320,7 @@ std::pair<region_t*, bool> remap_virus_reads(region_score_t& host_region_score, 
     // FIXME: what if best_region is null?
     std::cerr << "BEST VIRUS REGION: " << best_region->to_str() << " " << best_score.first << std::endl;
     remap_virus_reads_supp(best_region, !is_best_vregion_fwd, read_seq_ids, host_region_score.region, !host_region_score.fwd,
-            host_alignments, &virus_read_realignments, aligner, filter);
+            host_alignments, &virus_read_realignments, aligner, filter, host_window, virus_window);
 
     google::dense_hash_map<std::string, std::vector<std::string> > deduped_reads = dedup_reads(
             host_alignments, virus_read_realignments, host_region_score.region, host_region_score.fwd, best_region, is_best_vregion_fwd);
@@ -1369,9 +1377,12 @@ int calculate_coverage(std::vector<read_realignment_t> reads_realignments) {
     });
 
     uint16_t coverage = 0;
-    uint16_t curr_start = reads_realignments[0].offset_start, curr_end = reads_realignments[0].offset_end;
-    for (int i = 1; i < reads_realignments.size(); i++) {
+//    uint16_t curr_start = reads_realignments[0].offset_start, curr_end = reads_realignments[0].offset_end;
+    uint16_t curr_start = 0, curr_end = 0;
+    for (int i = 0; i < reads_realignments.size(); i++) {
         read_realignment_t& rr = reads_realignments[i];
+        if (rr.suspicious) continue;
+
         if (overlap(curr_start, curr_end, rr.offset_start, rr.offset_end) > 0) { // overlaps, extend if possible
             curr_end = std::max(curr_end, rr.offset_end);
         } else {
@@ -1925,7 +1936,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cerr << "HOST READS: " << host_reads.size() << std::endl;
-    std::cerr << "VIRUS READS: " << host_reads.size() << std::endl;
+    std::cerr << "VIRUS READS: " << virus_reads.size() << std::endl;
 
     /* ====== */
 
@@ -2247,7 +2258,10 @@ int main(int argc, char* argv[]) {
 
             // remap virus reads and find best virus regions
             std::vector<read_realignment_t> virus_read_realignments;
-            best_virus_region = remap_virus_reads(best_region_score, virus_read_realignments, virus_reads_by_name);
+            window_t host_window, virus_window;
+            best_virus_region = remap_virus_reads(best_region_score, virus_read_realignments, virus_reads_by_name,
+                    host_window, virus_window);
+
 
             if (best_virus_region.first == NULL) continue;
 
@@ -2299,10 +2313,30 @@ int main(int argc, char* argv[]) {
                     std::remove_if(kept_virus_read_realignments.begin(), kept_virus_read_realignments.end(), to_remove),
                     kept_virus_read_realignments.end());
 
-            best_region_score.reads = dedup_qnames.size() - qnames_to_remove.size();
+            // identify suspicious alignments - i.e. all low-complexity or clipped wrong because of garbage tail
+            auto is_suspicious = [](read_realignment_t& rr, window_t accept_window) {
+                if (is_low_complexity(rr.read, rr.left_clip_len(), rr.read->core.l_qseq-rr.right_clip_len())) { // mark low-complex as suspicious
+                    return true;
+                }
+                if (rr.left_clip_len() > config.max_sc_dist && abs(rr.offset_start - accept_window.start) > config.max_sc_dist) { // mark wrongly clipped as suspicious
+                    return true;
+                }
+                if (rr.right_clip_len() > config.max_sc_dist && abs(rr.offset_end - accept_window.end) > config.max_sc_dist) {
+                    return true;
+                }
+                return false;
+            };
+            for (read_realignment_t& hrr : kept_host_read_realignments) {
+                hrr.suspicious = is_suspicious(hrr, host_window);
+            }
+
+            best_region_score.reads = 0; //dedup_qnames.size() - qnames_to_remove.size();
             best_region_score.score = 0;
             for (read_realignment_t& hrr : kept_host_read_realignments) {
-                best_region_score.score += hrr.score;
+                if (!hrr.suspicious) {
+                    best_region_score.score += hrr.score;
+                    best_region_score.reads++;
+                }
             }
 
             region_scores.push(best_region_score);
@@ -2449,9 +2483,6 @@ int main(int argc, char* argv[]) {
 
         std::cerr << "INTEGRATION ID: " << v_int.id << std::endl;
         std::cerr << "ALREADY USED: " << already_used.size() << std::endl << std::endl;
-
-//        region_scores.pop();
-//        std::cerr << "REMAINING REGIONS: " << region_scores.size() << std::endl;
     }
 
     /* ==== */
