@@ -67,8 +67,9 @@ void categorize(int id, std::string contig, std::string bam_fname, int target_le
                 mtx.lock();
                 if ((is_first_read && good_clip_flag.first) || (!is_first_read && good_clip_flag.second)) {
                     uint8_t dir = is_first_read ? good_clip_flag.first : good_clip_flag.second;
-                    bam_aux_append(read, "CD", 'A', 1, &dir);
-                    anchor_reads->push_back(bam_dup1(read));
+                    bam1_t* copy = bam_dup1(read);
+                    bam_aux_append(copy, "CD", 'A', 1, &dir);
+                    anchor_reads->push_back(copy);
                 } else {
                     reads->push_back(bam_dup1(read));
                 }
@@ -86,6 +87,8 @@ void categorize(int id, std::string contig, std::string bam_fname, int target_le
     }
 
     close_samFile(bam_file_open);
+    bam_destroy1(read);
+    bam_itr_destroy(iter);
 }
 
 std::string print_fq(bam1_t* r) {
@@ -113,6 +116,7 @@ int main(int argc, char* argv[]) {
         virus_names.insert(seq->name.s);
     }
     kseq_destroy(seq);
+    fclose(virus_ref_fasta);
 
     std::string workdir = argv[2];
     std::string workspace = argv[3];
@@ -165,6 +169,7 @@ int main(int argc, char* argv[]) {
         }
     }
     close_samFile(virus_clips_file);
+    bam_destroy1(read);
 
     std::vector<bam1_t*> virus_side_reads, host_side_reads;
     std::vector<bam1_t*> virus_anchors, host_anchors;
@@ -189,15 +194,18 @@ int main(int argc, char* argv[]) {
     std::ofstream virus_fq(workspace + "/virus-side.fq"), host_fq(workspace + "/host-side.fq");
     for (bam1_t* r : host_side_reads) {
         host_fq << print_fq(r);
+        bam_destroy1(r);
     }
     for (bam1_t* r : virus_side_reads) {
         virus_fq << print_fq(r);
+        bam_destroy1(r);
     }
 
     samFile* virus_anchor_writer = open_bam_writer(workspace, "virus-anchors.bam", header);
     for (bam1_t* anchor : virus_anchors) {
         int ok = sam_write1(virus_anchor_writer, header, anchor);
         if (ok < 0) throw "Failed to write to " + std::string(virus_anchor_writer->fn);
+        bam_destroy1(anchor);
     }
     sam_close(virus_anchor_writer);
 
@@ -205,6 +213,7 @@ int main(int argc, char* argv[]) {
     for (bam1_t* anchor : host_anchors) {
         int ok = sam_write1(host_anchor_writer, header, anchor);
         if (ok < 0) throw "Failed to write to " + std::string(host_anchor_writer->fn);
+        bam_destroy1(anchor);
     }
     sam_close(host_anchor_writer);
 

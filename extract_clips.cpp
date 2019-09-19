@@ -23,7 +23,7 @@ std::unordered_map<std::string, int> contig_name2id;
 std::vector<int> tid_to_contig_id;
 std::unordered_set<std::string> virus_names;
 
-std::mutex mtx;
+std::mutex mtx, mtx_lc, mtx_rc;
 
 const int MAX_BUFFER_SIZE = 100;
 
@@ -57,41 +57,23 @@ void extract(int id, std::string contig, std::string bam_fname, int target_len, 
     hts_itr_t* iter = sam_itr_querys(idx, header, region);
     bam1_t* read = bam_init1();
 
-    std::deque<bam1_t*> two_way_buffer, forward_buffer;
-
     int i = 0;
-    while (sam_itr_next(bam_file, iter, read) >= 0 && i < MAX_BUFFER_SIZE-1) {
-        if (!is_unmapped(read)) {
-            bam1_t *read2 = bam_dup1(read);
-            add_to_queue(two_way_buffer, read2, 2*MAX_BUFFER_SIZE);
-            add_to_queue(forward_buffer, read2, MAX_BUFFER_SIZE);
-            i++;
-        }
-    }
-
-    while (!forward_buffer.empty()) {
-        while (sam_itr_next(bam_file, iter, read) >= 0) {
-            if (!is_unmapped(read)) {
-                bam1_t *read2 = bam_dup1(read);
-                bam1_t* to_destroy = add_to_queue(two_way_buffer, read2, 2*MAX_BUFFER_SIZE);
-                bam_destroy1(to_destroy);
-                add_to_queue(forward_buffer, read2, MAX_BUFFER_SIZE);
-                break;
-            }
-        }
-
-        bam1_t* read = bam_dup1(forward_buffer.front());
-        forward_buffer.pop_front();
+    while (sam_itr_next(bam_file, iter, read) >= 0) {
+        if (is_unmapped(read)) continue;
 
         // clipped read
-        mtx.lock();
         if (is_left_clipped(read) && get_left_clip_len(read) >= config.min_sc_size) {
-            lc_anchors->push_back(read);
+            mtx_lc.lock();
+            lc_anchors->push_back(bam_dup1(read));
+            mtx_lc.unlock();
         } else if (is_right_clipped(read) && get_right_clip_len(read) >= config.min_sc_size) {
-            rc_anchors->push_back(read);
+            mtx_rc.lock();
+            rc_anchors->push_back(bam_dup1(read));
+            mtx_rc.unlock();
         }
-        mtx.unlock();
     }
+    bam_destroy1(read);
+    bam_itr_destroy(iter);
 
     close_samFile(bam_file_open);
 }
@@ -106,6 +88,7 @@ int main(int argc, char* argv[]) {
         virus_names.insert(seq->name.s);
     }
     kseq_destroy(seq);
+    fclose(virus_ref_fasta);
 
     std::string workdir = argv[2];
     std::string workspace = argv[3];
@@ -122,18 +105,9 @@ int main(int argc, char* argv[]) {
 
     ctpl::thread_pool thread_pool(config.threads);
 
-    samFile* bam_file = sam_open(bam_fname.c_str(), "r");
-    if (bam_file == NULL) {
-        std::cerr << "Unable to open BAM file." << std::endl;
-        return -1;
-    }
 
-    int code = sam_index_build(bam_fname.c_str(), 0);
-    if (code != 0) {
-        throw "Cannot index " + std::string(bam_fname.c_str());
-    }
-
-    bam_hdr_t* header = sam_hdr_read(bam_file);
+    open_samFile_t* bam_file = open_samFile(bam_fname.c_str(), true);
+    bam_hdr_t* header = bam_file->header;
     tid_to_contig_id.resize(header->n_targets);
 
     std::vector<bam1_t*> lc_virus_anchors, rc_virus_anchors, lc_host_anchors, rc_host_anchors;
@@ -162,12 +136,14 @@ int main(int argc, char* argv[]) {
         if (ok < 0) throw "Failed to write to " + std::string(virus_anchor_writer->fn);
         virus_clip_out << ">" << bam_get_qname(anchor) << "_L_" << (anchor->core.flag & BAM_FREAD1 ? "1" : "2") << "\n";
         virus_clip_out << get_left_clip(anchor) << "\n";
+        bam_destroy1(anchor);
     }
     for (bam1_t* anchor : rc_virus_anchors) {
         int ok = sam_write1(virus_anchor_writer, header, anchor);
         if (ok < 0) throw "Failed to write to " + std::string(virus_anchor_writer->fn);
         virus_clip_out << ">" << bam_get_qname(anchor) << "_R_" << (anchor->core.flag & BAM_FREAD1 ? "1" : "2") << "\n";
         virus_clip_out << get_right_clip(anchor) << "\n";
+        bam_destroy1(anchor);
     }
     sam_close(virus_anchor_writer);
     virus_clip_out.close();
@@ -179,13 +155,17 @@ int main(int argc, char* argv[]) {
         if (ok < 0) throw "Failed to write to " + std::string(host_anchor_writer->fn);
         host_clip_out << ">" << bam_get_qname(anchor) << "_L_" << (anchor->core.flag & BAM_FREAD1 ? "1" : "2") << "\n";
         host_clip_out << get_left_clip(anchor) << "\n";
+        bam_destroy1(anchor);
     }
     for (bam1_t* anchor : rc_host_anchors) {
         int ok = sam_write1(host_anchor_writer, header, anchor);
         if (ok < 0) throw "Failed to write to " + std::string(host_anchor_writer->fn);
         host_clip_out << ">" << bam_get_qname(anchor) << "_R_" << (anchor->core.flag & BAM_FREAD1 ? "1" : "2") << "\n";
         host_clip_out << get_right_clip(anchor) << "\n";
+        bam_destroy1(anchor);
     }
     sam_close(host_anchor_writer);
     host_clip_out.close();
+
+    close_samFile(bam_file);
 }

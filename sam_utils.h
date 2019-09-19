@@ -129,19 +129,6 @@ bool is_poly_ACGT(bam1_t* r, bool aligned_only = false) {
     return double(maxc)/(end-start) >= 0.8;
 }
 
-bool is_poly_ACGT(const char* seq, int len) {
-    int a = 0, c = 0, g = 0, t = 0;
-    for (int i = 0; i < len; i++) {
-        char base = seq[i];
-        if (base == 'A') a++;
-        else if (base == 'C') c++;
-        else if (base == 'G') g++;
-        else if (base == 'T') t++;
-    }
-    int maxc = std::max(std::max(a,c), std::max(g,t));
-    return double(maxc)/len >= 0.8;
-}
-
 
 void get_rc(std::string& read) {
     int len = read.length();
@@ -181,7 +168,8 @@ std::string get_sequence(bam1_t* r, bool original_seq = false) { // if original_
     return std::string(seq);
 }
 
-bool is_low_complexity(bam1_t* read, int start, int end) {
+bool is_low_complexity(bam1_t* read, bool rc, int start, int end) {
+
     int count[256];
     count[0] = 0;
     for (uint8_t i = 1; i < 16; i*=2) {
@@ -191,14 +179,16 @@ bool is_low_complexity(bam1_t* read, int start, int end) {
         }
     }
 
-    const uint8_t* bam_seq = bam_get_seq(read);
+    std::string seq = get_sequence(read, true);
+    if (rc) get_rc(seq);
+
+    char chr2nucl[256];
+    chr2nucl['A'] = 1; chr2nucl['C'] = 2; chr2nucl['G'] = 4; chr2nucl['T'] = 8; chr2nucl['N'] = 15;
+
     for (uint8_t i = start+1; i < end; i++) {
-        uint8_t twobases = (bam_seqi(bam_seq, i-1) << 4) | bam_seqi(bam_seq, i);
+        uint8_t twobases = (chr2nucl[seq[i-1]] << 4) | chr2nucl[seq[i]];
         count[int(twobases)]++;
     }
-
-    char nucl2chr[16];
-    nucl2chr[1] = 'A'; nucl2chr[2] = 'C'; nucl2chr[4] = 'G'; nucl2chr[8] = 'T'; nucl2chr[15] = 'N';
 
     uint8_t top1 = 0, top2 = 0;
     for (uint8_t i = 1; i < 16; i*=2) {
@@ -214,7 +204,6 @@ bool is_low_complexity(bam1_t* read, int start, int end) {
     }
 
     bool is_lc = count[top1] + count[top2] >= (end-start+1)*0.75;
-//    std::cout << bam_get_qname(read) << " " << get_sequence(read).substr(start, end-start+1) << " " << is_lc << std::endl;
     return is_lc;
 }
 

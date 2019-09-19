@@ -3,6 +3,7 @@ import pysam, pyfaidx
 from random_pos_generator import RandomPositionGenerator
 import numpy as np
 
+
 MAX_READS = 1000
 GEN_DIST_SIZE = 10000
 MAX_ACCEPTABLE_IS = 20000
@@ -14,10 +15,12 @@ cmd_parser.add_argument('host_reference', help='Reference of the host organism i
 cmd_parser.add_argument('virus_reference', help='References of a list of viruses in FASTA format.')
 cmd_parser.add_argument('host_and_virus_reference', help='Joint references of host and viruses.')
 cmd_parser.add_argument('--threads', type=int, default=1, help='Number of threads to be used.')
-cmd_parser.add_argument('--samtools', help='Samtools path.', default='samtools')
 cmd_parser.add_argument('--bwa', default='bwa', help='BWA path.')
+cmd_parser.add_argument('--samtools', help='Samtools path.', default='samtools')
 cmd_parser.add_argument('--bedtools', default='bedtools', help='Bedtools path. Necessary if --wgs is not set and'
                                                                '--coveredRegionsBed is not provided.')
+cmd_parser.add_argument('--bcftools', help='Bcftools path.', default='bcftools')
+cmd_parser.add_argument('--tabix', help='Tabix path.', default='tabix')
 cmd_parser.add_argument('--wgs', action='store_true', help='The reference genome is uniformly covered by reads.'
                                                            'SurVirus needs to sample read pairs, and this option lets'
                                                            'it sample them from all over the genome.')
@@ -318,10 +321,46 @@ remapper_cmd = "./remapper %s %s %s %s > %s/results.txt 2> %s/log.txt" \
                   bam_files_and_workspaces, cmd_args.workdir, cmd_args.workdir)
 execute(remapper_cmd)
 
-filter_cmd = "./filter %s 0 > %s/results.t1.txt" % (cmd_args.workdir, cmd_args.workdir)
+
+open("%s/host_bp_seqs.fa" % cmd_args.workdir, 'w').close()
+# open("%s/virus_bp_seqs.fa" % cmd_args.workdir, 'w').close()
+with open(cmd_args.workdir + "/results.txt") as results_file:
+    for line in results_file:
+        id, h_bp, v_bp = line.split()[:3]
+        h_chr, h_strand, h_start, h_end = h_bp.split(':')
+        v_chr, v_strand, v_start, v_end = v_bp.split(':')
+        v_start, v_end = int(v_start), int(v_end)
+
+        bam_prefix = "%s/%s" % (readsx, id)
+        pysam.sort("-@", str(cmd_args.threads), "-o", "%s.sorted.bam" % bam_prefix, "%s.bam" % bam_prefix)
+        execute("%s index %s" % (cmd_args.samtools, "%s.sorted.bam" % bam_prefix))
+
+        pileup_cmd = "%s mpileup -Ou -f %s %s.sorted.bam | %s call -Oz -mv -o %s.vcf.gz" \
+                     % (cmd_args.bcftools, cmd_args.host_and_virus_reference, bam_prefix, cmd_args.bcftools, bam_prefix)
+        execute(pileup_cmd)
+
+        tabix_cmd = "%s %s.vcf.gz" % (cmd_args.tabix, bam_prefix)
+        execute(tabix_cmd)
+
+        host_seq_id = "%s_%c" % (id, "R" if h_strand == '+' else "L")
+        host_seq_cmd = "%s faidx %s %s:%s-%s | ~/bin/bcftools consensus %s.vcf.gz | sed 's,>.*,>%s,g' >> %s/host_bp_seqs.fa" \
+                       % (cmd_args.samtools, cmd_args.host_and_virus_reference, h_chr, h_start, h_end, bam_prefix,
+                          host_seq_id, cmd_args.workdir)
+        execute(host_seq_cmd)
+
+        # TODO: virus sequence is left to remapper.cpp because it is difficult to deal with circular integrations
+        # virus_seq_id = "%s_%c" % (id, "R" if v_strand == '+' else "L")
+        # fasta = ">%s\n %s" % (virus_seq_id, reference_fa[v_chr][v_start:v_end])
+        # with open('%s/temp_pipe.fa' % cmd_args.workdir, 'w') as pipe_f:
+        #     pipe_f.write(fasta)
+        #     virus_seq_cmd = "cat %s/temp_pipe.fa | ~/bin/bcftools consensus %s.vcf.gz | sed 's,>.*,>%s,g' >> %s/virus_bp_seqs.fa" \
+        #                 % (cmd_args.workdir, bam_prefix, virus_seq_id, cmd_args.workdir)
+        # execute(virus_seq_cmd)
+
+filter_cmd = "./filter %s > %s/results.t1.txt" % (cmd_args.workdir, cmd_args.workdir)
 execute(filter_cmd)
 
-filter_cmd = "./filter %s 0 --print-rejected > %s/results.discarded.txt" % (cmd_args.workdir, cmd_args.workdir)
+filter_cmd = "./filter %s --print-rejected > %s/results.discarded.txt" % (cmd_args.workdir, cmd_args.workdir)
 execute(filter_cmd)
 
 

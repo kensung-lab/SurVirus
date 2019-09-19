@@ -1,5 +1,4 @@
 #include <iostream>
-#include <fstream>
 #include <unordered_set>
 #include <mutex>
 #include <bitset>
@@ -146,9 +145,7 @@ void isolate(int id, char* bam_fname, int t_num) {
         int hit = 0;
         int len = 0;
         for (int i = 0; i < read->core.l_qseq; i++) {
-            mtx.lock();
             ull nv = nucl_bm[nucl2chr[bam_seqi(bam_seq, i)]];
-            mtx.unlock();
             kmer = ((kmer << 2) | nv) & KMER_MASK;
             len++;
             if (len >= KMER_LEN) {
@@ -238,4 +235,5 @@ int main(int argc, char* argv[]) {
     }
 
     fout.close();
+    close_samFile(bam_file);
 }

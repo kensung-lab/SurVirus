@@ -19,9 +19,7 @@ add_executable(extract_clips ${EXTRACT_CLIPS_SRC})
 set(READS_CATEGORIZER_SRC reads_categorizer.cpp sam_utils.h config.h libs/cptl_stl.h)
 add_executable(reads_categorizer ${READS_CATEGORIZER_SRC})
 
-file(GLOB ALGOLIB_SRC "alglib/*.h" "alglib/*.cpp" )
-
-set(REMAPPER_SRC ${ALGOLIB_SRC} libs/ssw.c libs/ssw_cpp.cpp remapper.cpp sam_utils.h config.h libs/cptl_stl.h cluster.h)
+set(REMAPPER_SRC libs/ssw.c libs/ssw_cpp.cpp remapper.cpp sam_utils.h config.h libs/cptl_stl.h cluster.h)
 add_executable(remapper ${REMAPPER_SRC})
 
 set(FILTER_SRC libs/ssw.c libs/ssw_cpp.cpp filter.cpp)

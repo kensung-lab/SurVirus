@@ -1,6 +1,4 @@
 #include <iostream>
-#include <fstream>
-#include <sstream>
 #include <vector>
 #include <cstring>
 #include <unistd.h>
@@ -12,26 +10,43 @@ KSEQ_INIT(int, read)
 #include "libs/ssw.h"
 #include "libs/ssw_cpp.h"
 
+
+void get_rc(std::string& read) {
+    int len = read.length();
+    for (int i = 0; i < len/2; i++) {
+        std::swap(read[i], read[len-i-1]);
+    }
+    for (int i = 0; i < len; i++) {
+        if (toupper(read[i]) == 'A') read[i] = 'T';
+        else if (toupper(read[i]) == 'C') read[i] = 'G';
+        else if (toupper(read[i]) == 'G') read[i] = 'C';
+        else if (toupper(read[i]) == 'T') read[i] = 'A';
+        else read[i] = 'N';
+    }
+}
+
 struct breakpoint_t {
     std::string chr;
     bool rev;
-    int pos;
+    int start, end;
+
+    int pos() {return rev ? start : end;}
 
     breakpoint_t() {}
     breakpoint_t(std::string& str) {
         char chr[1000], strand;
-        sscanf(str.data(), "%[^:]:%c%d", chr, &strand, &pos);
+        sscanf(str.data(), "%[^:]:%c:%d:%d", chr, &strand, &start, &end);
         this->chr = chr;
         rev = (strand == '-');
     }
 
-    bool operator == (const breakpoint_t& other) {
-        return chr == other.chr && rev == other.rev && pos == other.pos;
+    bool operator == (breakpoint_t& other) {
+        return chr == other.chr && rev == other.rev && pos() == other.pos();
     }
 
     std::string to_string() {
         std::stringstream ssout;
-        ssout << chr << ':' << (rev ? '-' : '+') << pos;
+        ssout << chr << ':' << (rev ? '-' : '+') << pos();
         return ssout.str();
     }
 };
@@ -39,8 +54,8 @@ struct breakpoint_t {
 struct call_t {
     int id;
     breakpoint_t host_bp, virus_bp;
-    int reads, split_reads, reads_w_dups, unique_reads_w_dups, score;
-    double pval_mwu, pval_ks, host_pbs, virus_pbs;
+    int reads, good_reads, split_reads, reads_w_dups, unique_reads_w_dups, score;
+    double host_pbs, virus_pbs;
     double host_cov, virus_cov;
     bool removed = false;
     int paired_with = -1;
@@ -48,26 +63,23 @@ struct call_t {
     call_t(std::string& line) {
         std::stringstream ssin(line);
         std::string host_bp_str, virus_bp_str;
-        std::string id_str;
-        ssin >> id_str >> host_bp_str >> virus_bp_str >> reads >> split_reads >> score >> pval_mwu >> pval_ks >> host_pbs >> virus_pbs
+        ssin >> id >> host_bp_str >> virus_bp_str >> reads >> good_reads >> split_reads >> score >> host_pbs >> virus_pbs
             >> reads_w_dups >> unique_reads_w_dups >> host_cov >> virus_cov;
-        id = std::stoi(id_str.substr(3));
         host_bp = breakpoint_t(host_bp_str);
         virus_bp = breakpoint_t(virus_bp_str);
     }
-
-    double pval() { return std::max(pval_mwu, pval_ks); }
 
     double coverage() { return (host_cov + virus_cov)/2; }
 
     bool is_paired() { return paired_with >= 0; }
 
     std::string to_string() {
-        std::stringstream ssout;
-        ssout << "ID=" << id << " " << host_bp.to_string() << " " << virus_bp.to_string() << " READS=" << reads << " SPLIT_READS=" << split_reads;
-        ssout << " PVAL=" << pval() << " HOST_PBS=" << host_pbs << " COVERAGE=" << coverage();
-        if (is_paired()) ssout << " PAIRED WITH ID=" << paired_with;
-        return ssout.str();
+        char buffer[10000];
+        sprintf(buffer, "ID=%d %s %s GOOD_READS=%d TOT_READS=%d SPLIT_READS=%d HOST_PBS=%lf COVERAGE=%lf",
+                id, host_bp.to_string().c_str(), virus_bp.to_string().c_str(), good_reads, reads, split_reads, host_pbs, coverage());
+        std::string sout = buffer;
+        if (is_paired()) sout += " PAIRED WITH ID=" + std::to_string(paired_with);
+        return sout;
     }
 };
 
@@ -75,11 +87,11 @@ int pair_dist(call_t& c1, call_t& c2) {
     if (c1.host_bp.chr == c2.host_bp.chr && c1.host_bp.rev != c2.host_bp.rev && c1.virus_bp.rev != c2.virus_bp.rev) {
         int rev_pos, fwd_pos;
         if (c1.host_bp.rev) {
-            rev_pos = c1.host_bp.pos;
-            fwd_pos = c2.host_bp.pos;
+            rev_pos = c1.host_bp.pos();
+            fwd_pos = c2.host_bp.pos();
         } else {
-            rev_pos = c2.host_bp.pos;
-            fwd_pos = c1.host_bp.pos;
+            rev_pos = c2.host_bp.pos();
+            fwd_pos = c1.host_bp.pos();
         }
 
         if (rev_pos-fwd_pos >= -50 && rev_pos-fwd_pos <= 1000) {
@@ -96,6 +108,19 @@ void print_calls(std::vector<call_t>& calls) {
             std::cout << call.to_string() << std::endl;
         }
     }
+}
+
+StripedSmithWaterman::Alignment align(StripedSmithWaterman::Aligner& aligner, std::string& ref, std::string& query) {
+    std::string rc_query = query;
+    get_rc(rc_query);
+
+    StripedSmithWaterman::Alignment h_aln, h_aln_rc;
+    StripedSmithWaterman::Filter filter;
+    aligner.Align(query.c_str(), ref.c_str(), ref.length(), filter, &h_aln, 0);
+    aligner.Align(rc_query.c_str(), ref.c_str(), ref.length(), filter, &h_aln_rc, 0);
+
+    if (h_aln.sw_score > h_aln_rc.sw_score) return h_aln;
+    else return h_aln_rc;
 }
 
 int main(int argc, char* argv[]) {
@@ -117,9 +142,6 @@ int main(int argc, char* argv[]) {
             args.push_back(argv[i]);
         }
     }
-
-    double min_pval = 0.001;
-    if (args.size() >= 1) min_pval = std::stod(args[0]);
 
     double min_reads = 4;
     if (args.size() >= 2) min_reads = std::stoi(args[1]);
@@ -147,15 +169,13 @@ int main(int argc, char* argv[]) {
         call_t call(line);
 
         bool accept = true;
-        if (call.pval() < min_pval) accept = false;
         if (call.host_pbs < min_host_pbs) accept = false;
-        if (call.reads < min_reads-1 || (call.reads == min_reads-1 && call.split_reads == 0)) accept = false;
-//        if (call.reads < min_reads) accept = false;
+        if (call.good_reads < min_reads-1 || (call.good_reads == min_reads-1 && call.split_reads == 0)) accept = false;
         if (host_virus_bp_seqs[call.id].first.length() < config.read_len/2 || host_virus_bp_seqs[call.id].second.length() < config.read_len/2) {
             accept = false;
         }
 
-        if (call.coverage() >= min_cov_for_accept) accept = true;
+        if (call.coverage() >= min_cov_for_accept && call.good_reads > 2) accept = true;
         if (accept_clipped && call.split_reads > 0) accept = true;
 
         if (accept) {
@@ -214,7 +234,6 @@ int main(int argc, char* argv[]) {
 
     // find duplicates
     StripedSmithWaterman::Aligner aligner(1, 4, 6, 1, false);
-    StripedSmithWaterman::Filter filter;
     for (int j = 0; j < accepted_calls.size(); j++) {
         std::string hseq_j = host_virus_bp_seqs[accepted_calls[j].id].first;
         std::string vseq_j = host_virus_bp_seqs[accepted_calls[j].id].second;
@@ -223,27 +242,25 @@ int main(int argc, char* argv[]) {
             std::string hseq_i = host_virus_bp_seqs[accepted_calls[i].id].first;
             std::string vseq_i = host_virus_bp_seqs[accepted_calls[i].id].second;
 
-            std::string& h_ref = hseq_i.length() >= hseq_j.length() ? hseq_i : hseq_j;
-            std::string& h_query = hseq_i.length() >= hseq_j.length() ? hseq_j : hseq_i;
-            std::string& v_ref = vseq_i.length() >= vseq_j.length() ? vseq_i : vseq_j;
-            std::string& v_query = vseq_i.length() >= vseq_j.length() ? vseq_j : vseq_i;
+            std::string h_ref = hseq_i.length() >= hseq_j.length() ? hseq_i : hseq_j;
+            std::string h_query = hseq_i.length() >= hseq_j.length() ? hseq_j : hseq_i;
+            std::string v_ref = vseq_i.length() >= vseq_j.length() ? vseq_i : vseq_j;
+            std::string v_query = vseq_i.length() >= vseq_j.length() ? vseq_j : vseq_i;
 
-            StripedSmithWaterman::Alignment h_aln, v_aln;
-            aligner.Align(h_query.c_str(), h_ref.c_str(), h_ref.length(), filter, &h_aln, 0);
-            bool same_hseq = h_aln.sw_score >= h_query.length()*0.8;
-
-            aligner.Align(v_query.c_str(), v_ref.c_str(), v_ref.length(), filter, &v_aln, 0);
-            bool same_vseq = v_aln.sw_score >= v_query.length()*0.8;
+            StripedSmithWaterman::Alignment h_aln = align(aligner, h_ref, h_query), v_aln = align(aligner, v_ref, v_query);
+            bool same_hseq = h_aln.query_end-h_aln.query_begin >= h_query.length()*0.8;
+            bool same_vseq = v_aln.query_end-v_aln.query_begin >= v_query.length()*0.8;
 
             if (same_hseq && same_vseq) {
-                if (hseq_j.length() > hseq_i.length()) {
-                    accepted_calls[i].host_bp = accepted_calls[j].host_bp;
-                    host_virus_bp_seqs[i].first = host_virus_bp_seqs[j].first;
-                }
-                if (vseq_j.length() > vseq_i.length()) {
-                    accepted_calls[i].virus_bp = accepted_calls[j].virus_bp;
-                    host_virus_bp_seqs[i].second = host_virus_bp_seqs[j].second;
-                }
+//                if (hseq_j.length() > hseq_i.length()) {
+//                    std::cerr << "SWAPPING " << accepted_calls[i].id << " " << accepted_calls[j].id << std::endl;
+//                    accepted_calls[i].host_bp = accepted_calls[j].host_bp;
+//                    host_virus_bp_seqs[i].first = host_virus_bp_seqs[j].first;
+//                }
+//                if (vseq_j.length() > vseq_i.length()) {
+//                    accepted_calls[i].virus_bp = accepted_calls[j].virus_bp;
+//                    host_virus_bp_seqs[i].second = host_virus_bp_seqs[j].second;
+//                }
                 accepted_calls[j].removed = true;
                 break;
             }
