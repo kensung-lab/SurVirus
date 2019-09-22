@@ -1634,6 +1634,10 @@ google::dense_hash_set<std::string> mismatch_filter(region_t* host_region, std::
     return qnames_to_remove;
 }
 
+int fix_tid(open_samFile_t* sam_file, bam1_t* read) {
+    std::string target_name = sam_file->header->target_name[read->core.tid];
+    return contig_id2tid[contig_name2id[target_name]];
+}
 
 int main(int argc, char* argv[]) {
 
@@ -1754,7 +1758,7 @@ int main(int argc, char* argv[]) {
             std::string qname = bam_get_qname(read);
             bool first = qname[qname.length()-1] == '1';
             qname = qname.substr(0, qname.length()-4);
-            good_clips_pos[first ? 0 : 1][qname] = {read->core.tid, read->core.pos};
+            good_clips_pos[first ? 0 : 1][qname] = {fix_tid(host_clips_file, read), read->core.pos};
         }
         close_samFile(host_clips_file);
 
@@ -1763,7 +1767,7 @@ int main(int argc, char* argv[]) {
             std::string qname = bam_get_qname(read);
             bool first = qname[qname.length()-1] == '1';
             qname = qname.substr(0, qname.length()-4);
-            good_clips_pos[first ? 0 : 1][qname] = {read->core.tid, read->core.pos};
+            good_clips_pos[first ? 0 : 1][qname] = {fix_tid(virus_clips_file, read), read->core.pos};
         }
         close_samFile(virus_clips_file);
 
