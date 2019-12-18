@@ -3,27 +3,29 @@
 #include <cstring>
 #include <unistd.h>
 #include <htslib/kseq.h>
+#include <htslib/sam.h>
 
 KSEQ_INIT(int, read)
 
 #include "config.h"
+#include "sam_utils.h"
 #include "libs/ssw.h"
 #include "libs/ssw_cpp.h"
 
 
-void get_rc(std::string& read) {
-    int len = read.length();
-    for (int i = 0; i < len/2; i++) {
-        std::swap(read[i], read[len-i-1]);
-    }
-    for (int i = 0; i < len; i++) {
-        if (toupper(read[i]) == 'A') read[i] = 'T';
-        else if (toupper(read[i]) == 'C') read[i] = 'G';
-        else if (toupper(read[i]) == 'G') read[i] = 'C';
-        else if (toupper(read[i]) == 'T') read[i] = 'A';
-        else read[i] = 'N';
-    }
-}
+//void get_rc(std::string& read) {
+//    int len = read.length();
+//    for (int i = 0; i < len/2; i++) {
+//        std::swap(read[i], read[len-i-1]);
+//    }
+//    for (int i = 0; i < len; i++) {
+//        if (toupper(read[i]) == 'A') read[i] = 'T';
+//        else if (toupper(read[i]) == 'C') read[i] = 'G';
+//        else if (toupper(read[i]) == 'G') read[i] = 'C';
+//        else if (toupper(read[i]) == 'T') read[i] = 'A';
+//        else read[i] = 'N';
+//    }
+//}
 
 struct breakpoint_t {
     std::string chr;
@@ -132,12 +134,14 @@ int main(int argc, char* argv[]) {
     std::ifstream fin(workdir + "/results.txt");
 
     std::vector<std::string> args;
-    bool print_rejected = false, accept_clipped = false;
+    bool print_rejected = false, accept_clipped = false, remap = false;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--print-rejected") == 0) {
             print_rejected = true;
         } else if (strcmp(argv[i], "--accept-all-clipped") == 0) {
             accept_clipped = true;
+        } else if (strcmp(argv[i], "--remap") == 0) {
+            remap = true;
         } else {
             args.push_back(argv[i]);
         }
@@ -162,11 +166,22 @@ int main(int argc, char* argv[]) {
         host_virus_bp_seqs.push_back({hseq->seq.s, vseq->seq.s});
     }
 
+    std::cerr << min_reads << std::endl;
 
     std::vector<call_t> accepted_calls, rejected_calls;
     std::string line;
     while (std::getline(fin, line)) {
         call_t call(line);
+
+        if (remap) {
+            bam1_t* read = bam_init1();
+            open_samFile_t* open_sam = open_samFile((workdir + "/readsx/" + std::to_string(call.id) + ".bam").c_str());
+            hts_itr_t* iter = sam_itr_querys(open_sam->idx, open_sam->header, "");
+            while (sam_itr_next(open_sam->file, iter, read) >= 0) {
+
+            }
+            bam_destroy1(read);
+        }   
 
         bool accept = true;
         if (call.host_pbs < min_host_pbs) accept = false;

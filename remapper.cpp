@@ -1323,6 +1323,7 @@ std::pair<region_t*, bool> remap_virus_reads(region_score_t& host_region_score, 
                 set_to_reverse(rc_read);
                 rc_read->core.flag &= ~BAM_FREVERSE;
             }
+            rc_read->core.flag |= BAM_FSECONDARY;
 
             std::string clip = get_sequence(rc_read, true);
             virus_reads_seqs.push_back(read_seq_t(rc_read, clip));
@@ -1808,6 +1809,7 @@ int main(int argc, char* argv[]) {
                 auto hc_pos = good_clips_pos[read->core.flag & BAM_FREAD1 ? 0 : 1][bam_get_qname(read)];
                 copy->core.tid = hc_pos.first;
                 copy->core.pos = hc_pos.second;
+                copy->core.flag |= BAM_FSECONDARY;
                 host_reads.push_back(copy);
             } else {
                 good_clipped_pairs[bam_get_qname(read)].push_back({bam_dup1(read), false});
@@ -2294,7 +2296,10 @@ int main(int argc, char* argv[]) {
 
             // identify suspicious alignments - i.e. all low-complexity or clipped wrong because of garbage tail
             auto is_suspicious = [](read_realignment_t& rr, window_t accept_window) {
-                if (is_low_complexity(rr.read, rr.rc, rr.left_clip_len(), rr.read->core.l_qseq-rr.right_clip_len())) { // mark low-complex as suspicious
+                char* chr = chrs[contig_id2name[contig_tid2id[rr.read->core.tid]]].first;
+                bool lc_q = is_low_complexity(rr.read, rr.rc, rr.left_clip_len(), rr.read->core.l_qseq-rr.right_clip_len());
+                bool lc_r = is_low_complexity(chr, false, rr.read->core.pos, bam_endpos(rr.read));
+                if (lc_q || lc_r) {
                     return true;
                 }
                 if (rr.left_clip_len() > config.max_sc_dist && abs(rr.offset_start - accept_window.start) > config.max_sc_dist) { // mark wrongly clipped as suspicious
@@ -2305,11 +2310,18 @@ int main(int argc, char* argv[]) {
                 }
                 return false;
             };
-            for (read_realignment_t& hrr : kept_host_read_realignments) {
-                hrr.suspicious = is_suspicious(hrr, host_window);
-            }
+
+            std::unordered_set<std::string> suspicious_virus_aln;
             for (read_realignment_t& vrr : kept_virus_read_realignments) {
-                vrr.suspicious = is_suspicious(vrr, virus_window);
+                if (is_suspicious(vrr, virus_window)) {
+                    vrr.suspicious = true;
+                    suspicious_virus_aln.insert(bam_get_qname(vrr.read));
+                }
+            }
+            for (read_realignment_t& hrr : kept_host_read_realignments) {
+                if (is_suspicious(hrr, host_window) || suspicious_virus_aln.count(bam_get_qname(hrr.read))) {
+                    hrr.suspicious = true;
+                }
             }
 
             best_region_score.reads = 0;

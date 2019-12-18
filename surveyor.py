@@ -60,7 +60,6 @@ bam_files = [pysam.AlignmentFile(bam_name) for bam_name in bam_names]
 
 
 # Create config file in workdir
-
 config_file = open(cmd_args.workdir + "/config.txt", "w")
 config_file.write("threads %d\n" % cmd_args.threads)
 config_file.write("min_sc_size %d\n" % cmd_args.minClipSize)
@@ -323,7 +322,6 @@ execute(remapper_cmd)
 
 
 open("%s/host_bp_seqs.fa" % cmd_args.workdir, 'w').close()
-# open("%s/virus_bp_seqs.fa" % cmd_args.workdir, 'w').close()
 with open(cmd_args.workdir + "/results.txt") as results_file:
     for line in results_file:
         id, h_bp, v_bp = line.split()[:3]
@@ -343,9 +341,9 @@ with open(cmd_args.workdir + "/results.txt") as results_file:
         execute(tabix_cmd)
 
         host_seq_id = "%s_%c" % (id, "R" if h_strand == '+' else "L")
-        host_seq_cmd = "%s faidx %s %s:%s-%s | ~/bin/bcftools consensus %s.vcf.gz | sed 's,>.*,>%s,g' >> %s/host_bp_seqs.fa" \
-                       % (cmd_args.samtools, cmd_args.host_and_virus_reference, h_chr, h_start, h_end, bam_prefix,
-                          host_seq_id, cmd_args.workdir)
+        host_seq_cmd = "%s faidx %s %s:%s-%s | %s consensus %s.vcf.gz | sed 's,>.*,>%s,g' >> %s/host_bp_seqs.fa" \
+                       % (cmd_args.samtools, cmd_args.host_and_virus_reference, h_chr, h_start, h_end, cmd_args.bcftools,
+                          bam_prefix, host_seq_id, cmd_args.workdir)
         execute(host_seq_cmd)
 
         # TODO: virus sequence is left to remapper.cpp because it is difficult to deal with circular integrations

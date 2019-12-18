@@ -168,7 +168,7 @@ std::string get_sequence(bam1_t* r, bool original_seq = false) { // if original_
     return std::string(seq);
 }
 
-bool is_low_complexity(bam1_t* read, bool rc, int start, int end) {
+bool is_low_complexity(char* seq, bool rc, int start, int end) {
 
     int count[256];
     count[0] = 0;
@@ -179,13 +179,12 @@ bool is_low_complexity(bam1_t* read, bool rc, int start, int end) {
         }
     }
 
-    std::string seq = get_sequence(read, true);
-    if (rc) get_rc(seq);
+    if (rc) get_rc(seq, strlen(seq)); // what's the use of RC when determining low-complexity?
 
     char chr2nucl[256];
     chr2nucl['A'] = 1; chr2nucl['C'] = 2; chr2nucl['G'] = 4; chr2nucl['T'] = 8; chr2nucl['N'] = 15;
 
-    for (uint8_t i = start+1; i < end; i++) {
+    for (int i = start+1; i < end; i++) {
         uint8_t twobases = (chr2nucl[seq[i-1]] << 4) | chr2nucl[seq[i]];
         count[int(twobases)]++;
     }
@@ -205,6 +204,10 @@ bool is_low_complexity(bam1_t* read, bool rc, int start, int end) {
 
     bool is_lc = count[top1] + count[top2] >= (end-start+1)*0.75;
     return is_lc;
+}
+bool is_low_complexity(bam1_t* read, bool rc, int start, int end) {
+    std::string seq = get_sequence(read);
+    return is_low_complexity((char*) seq.data(), rc, start, end);
 }
 
 std::string get_left_clip(bam1_t* read) {
