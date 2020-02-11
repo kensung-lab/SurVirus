@@ -19,8 +19,11 @@ add_executable(extract_clips ${EXTRACT_CLIPS_SRC})
 set(READS_CATEGORIZER_SRC reads_categorizer.cpp sam_utils.h config.h libs/cptl_stl.h)
 add_executable(reads_categorizer ${READS_CATEGORIZER_SRC})
 
-set(REMAPPER_SRC libs/ssw.c libs/ssw_cpp.cpp remapper.cpp sam_utils.h config.h libs/cptl_stl.h cluster.h)
+set(REMAPPER_SRC libs/ssw.c libs/ssw_cpp.cpp remapper.cpp sam_utils.h config.h libs/cptl_stl.h structs.h)
 add_executable(remapper ${REMAPPER_SRC})
+
+set(CONSENSUS_BUILDER_SRC consensus_builder.cpp)
+add_executable(consensus_builder ${CONSENSUS_BUILDER_SRC})
 
 set(FILTER_SRC libs/ssw.c libs/ssw_cpp.cpp filter.cpp)
 add_executable(filter ${FILTER_SRC})

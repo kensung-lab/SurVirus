@@ -17,7 +17,7 @@
 KSEQ_INIT(int, read)
 
 #include "sam_utils.h"
-#include "cluster.h"
+#include "structs.h"
 #include "config.h"
 #include "libs/ssw.h"
 #include "libs/ssw_cpp.h"

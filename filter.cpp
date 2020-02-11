@@ -11,97 +11,7 @@ KSEQ_INIT(int, read)
 #include "sam_utils.h"
 #include "libs/ssw.h"
 #include "libs/ssw_cpp.h"
-
-
-//void get_rc(std::string& read) {
-//    int len = read.length();
-//    for (int i = 0; i < len/2; i++) {
-//        std::swap(read[i], read[len-i-1]);
-//    }
-//    for (int i = 0; i < len; i++) {
-//        if (toupper(read[i]) == 'A') read[i] = 'T';
-//        else if (toupper(read[i]) == 'C') read[i] = 'G';
-//        else if (toupper(read[i]) == 'G') read[i] = 'C';
-//        else if (toupper(read[i]) == 'T') read[i] = 'A';
-//        else read[i] = 'N';
-//    }
-//}
-
-struct breakpoint_t {
-    std::string chr;
-    bool rev;
-    int start, end;
-
-    int pos() {return rev ? start : end;}
-
-    breakpoint_t() {}
-    breakpoint_t(std::string& str) {
-        char chr[1000], strand;
-        sscanf(str.data(), "%[^:]:%c:%d:%d", chr, &strand, &start, &end);
-        this->chr = chr;
-        rev = (strand == '-');
-    }
-
-    bool operator == (breakpoint_t& other) {
-        return chr == other.chr && rev == other.rev && pos() == other.pos();
-    }
-
-    std::string to_string() {
-        std::stringstream ssout;
-        ssout << chr << ':' << (rev ? '-' : '+') << pos();
-        return ssout.str();
-    }
-};
-
-struct call_t {
-    int id;
-    breakpoint_t host_bp, virus_bp;
-    int reads, good_reads, split_reads, reads_w_dups, unique_reads_w_dups, score;
-    double host_pbs, virus_pbs;
-    double host_cov, virus_cov;
-    bool removed = false;
-    int paired_with = -1;
-
-    call_t(std::string& line) {
-        std::stringstream ssin(line);
-        std::string host_bp_str, virus_bp_str;
-        ssin >> id >> host_bp_str >> virus_bp_str >> reads >> good_reads >> split_reads >> score >> host_pbs >> virus_pbs
-            >> reads_w_dups >> unique_reads_w_dups >> host_cov >> virus_cov;
-        host_bp = breakpoint_t(host_bp_str);
-        virus_bp = breakpoint_t(virus_bp_str);
-    }
-
-    double coverage() { return (host_cov + virus_cov)/2; }
-
-    bool is_paired() { return paired_with >= 0; }
-
-    std::string to_string() {
-        char buffer[10000];
-        sprintf(buffer, "ID=%d %s %s GOOD_READS=%d TOT_READS=%d SPLIT_READS=%d HOST_PBS=%lf COVERAGE=%lf",
-                id, host_bp.to_string().c_str(), virus_bp.to_string().c_str(), good_reads, reads, split_reads, host_pbs, coverage());
-        std::string sout = buffer;
-        if (is_paired()) sout += " PAIRED WITH ID=" + std::to_string(paired_with);
-        return sout;
-    }
-};
-
-int pair_dist(call_t& c1, call_t& c2) {
-    if (c1.host_bp.chr == c2.host_bp.chr && c1.host_bp.rev != c2.host_bp.rev && c1.virus_bp.rev != c2.virus_bp.rev) {
-        int rev_pos, fwd_pos;
-        if (c1.host_bp.rev) {
-            rev_pos = c1.host_bp.pos();
-            fwd_pos = c2.host_bp.pos();
-        } else {
-            rev_pos = c2.host_bp.pos();
-            fwd_pos = c1.host_bp.pos();
-        }
-
-        if (rev_pos-fwd_pos >= -50 && rev_pos-fwd_pos <= 1000) {
-            return rev_pos-fwd_pos;
-        }
-    }
-    return INT32_MAX;
-}
+#include "structs.h"
 
 void print_calls(std::vector<call_t>& calls) {
     for (int i = 0; i < calls.size(); i++) {
@@ -165,8 +75,6 @@ int main(int argc, char* argv[]) {
     while (kseq_read(hseq) >= 0 && kseq_read(vseq) >= 0) {
         host_virus_bp_seqs.push_back({hseq->seq.s, vseq->seq.s});
     }
-
-    std::cerr << min_reads << std::endl;
 
     std::vector<call_t> accepted_calls, rejected_calls;
     std::string line;
