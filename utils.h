@@ -77,6 +77,12 @@ struct breakpoint_t {
 
     std::string to_string() {
         std::stringstream ssout;
+        ssout << chr << ':' << (rev ? '-' : '+') << ":" << start << ":" << end;
+        return ssout.str();
+    }
+
+    std::string to_human_string() {
+        std::stringstream ssout;
         ssout << chr << ':' << (rev ? '-' : '+') << pos();
         return ssout.str();
     }
@@ -105,9 +111,17 @@ struct call_t {
     bool is_paired() { return paired_with >= 0; }
 
     std::string to_string() {
+        std::stringstream ssout;
+        ssout << id << " " << host_bp.to_string() << " " << virus_bp.to_string() << " " << reads << " " << good_reads << " ";
+        ssout << split_reads << " " << score << " " << host_pbs << " " << virus_pbs << " " << reads_w_dups << " ";
+        ssout << unique_reads_w_dups << " " << host_cov << " " << virus_cov;
+        return ssout.str();
+    }
+
+    std::string to_human_string() {
         char buffer[10000];
         sprintf(buffer, "ID=%d %s %s GOOD_READS=%d TOT_READS=%d SPLIT_READS=%d HOST_PBS=%lf COVERAGE=%lf",
-                id, host_bp.to_string().c_str(), virus_bp.to_string().c_str(), good_reads, reads, split_reads, host_pbs, coverage());
+                id, host_bp.to_human_string().c_str(), virus_bp.to_human_string().c_str(), good_reads, reads, split_reads, host_pbs, coverage());
         std::string sout = buffer;
         if (is_paired()) sout += " PAIRED WITH ID=" + std::to_string(paired_with);
         return sout;
@@ -130,6 +144,36 @@ int pair_dist(call_t& c1, call_t& c2) {
         }
     }
     return INT32_MAX;
+}
+
+struct chr_seq_t {
+    char* seq;
+    int len;
+    bool circular;
+
+    chr_seq_t(char* seq, int len, bool circular) : seq(seq), len(len), circular(circular) {}
+    ~chr_seq_t() {delete[] seq;}
+};
+typedef std::unordered_map<std::string, chr_seq_t*> chr_seqs_map_t;
+
+void read_fasta_into_map(chr_seqs_map_t& chr_seqs, std::string& reference_fname, bool circular_seq = false) {
+    FILE* fasta = fopen(reference_fname.c_str(), "r");
+    kseq_t* seq = kseq_init(fileno(fasta));
+    while (kseq_read(seq) >= 0) {
+        std::string seq_name = seq->name.s;
+        if (circular_seq) {
+            char* chr_seq = new char[seq->seq.l + seq->seq.l/2 + 1];
+            strcpy(chr_seq, seq->seq.s);
+            strncpy(chr_seq+seq->seq.l, seq->seq.s, seq->seq.l/2);
+            chr_seqs[seq_name] = new chr_seq_t(chr_seq, seq->seq.l + seq->seq.l/2, true);
+        } else {
+            char* chr_seq = new char[seq->seq.l + 1];
+            strcpy(chr_seq, seq->seq.s);
+            chr_seqs[seq_name] = new chr_seq_t(chr_seq, seq->seq.l, false);
+        }
+    }
+    kseq_destroy(seq);
+    fclose(fasta);
 }
 
 #endif //SURVEYOR_CLUSTER_H

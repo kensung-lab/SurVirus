@@ -11,13 +11,13 @@ KSEQ_INIT(int, read)
 #include "sam_utils.h"
 #include "libs/ssw.h"
 #include "libs/ssw_cpp.h"
-#include "structs.h"
+#include "utils.h"
 
 void print_calls(std::vector<call_t>& calls) {
     for (int i = 0; i < calls.size(); i++) {
         call_t call = calls[i];
         if (!call.removed) {
-            std::cout << call.to_string() << std::endl;
+            std::cout << call.to_human_string() << std::endl;
         }
     }
 }

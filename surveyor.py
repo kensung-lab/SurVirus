@@ -340,20 +340,16 @@ with open(cmd_args.workdir + "/results.txt") as results_file:
         tabix_cmd = "%s %s.vcf.gz" % (cmd_args.tabix, bam_prefix)
         execute(tabix_cmd)
 
-        host_seq_id = "%s_%c" % (id, "R" if h_strand == '+' else "L")
+        host_seq_id = "%s" % id
         host_seq_cmd = "%s faidx %s %s:%s-%s | %s consensus %s.vcf.gz | sed 's,>.*,>%s,g' >> %s/host_bp_seqs.fa" \
                        % (cmd_args.samtools, cmd_args.host_and_virus_reference, h_chr, h_start, h_end, cmd_args.bcftools,
                           bam_prefix, host_seq_id, cmd_args.workdir)
         execute(host_seq_cmd)
 
-        # TODO: virus sequence is left to remapper.cpp because it is difficult to deal with circular integrations
-        # virus_seq_id = "%s_%c" % (id, "R" if v_strand == '+' else "L")
-        # fasta = ">%s\n %s" % (virus_seq_id, reference_fa[v_chr][v_start:v_end])
-        # with open('%s/temp_pipe.fa' % cmd_args.workdir, 'w') as pipe_f:
-        #     pipe_f.write(fasta)
-        #     virus_seq_cmd = "cat %s/temp_pipe.fa | ~/bin/bcftools consensus %s.vcf.gz | sed 's,>.*,>%s,g' >> %s/virus_bp_seqs.fa" \
-        #                 % (cmd_args.workdir, bam_prefix, virus_seq_id, cmd_args.workdir)
-        # execute(virus_seq_cmd)
+
+bp_consensus_cmd = "./bp_region_consensus_builder %s %s %s %s" \
+                   % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, " ".join(bam_workspaces))
+execute(bp_consensus_cmd)
 
 filter_cmd = "./filter %s > %s/results.t1.txt" % (cmd_args.workdir, cmd_args.workdir)
 execute(filter_cmd)
