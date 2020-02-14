@@ -11,11 +11,6 @@ KSEQ_INIT(int, read)
 #include "sam_utils.h"
 #include "utils.h"
 
-std::vector<std::string> contig_id2name;
-std::unordered_map<std::string, int> contig_name2id;
-
-std::unordered_map<std::string, int> virus_names;
-
 
 std::vector<bam1_t*> get_redux_reads(char* reads_fname, std::string& target_chr) {
     std::vector<bam1_t*> reads;
@@ -155,8 +150,8 @@ int main(int argc, char* argv[]) {
     read_fasta_into_map(chr_seqs, host_reference_fname);
     read_fasta_into_map(chr_seqs, virus_reference_fname, true);
 
-    std::ofstream host_bp_seqs(workdir + "/host_bp_seqs2.fa");
-    std::ofstream virus_bp_seqs(workdir + "/virus_bp_seqs2.fa");
+    std::ofstream host_bp_seqs(workdir + "/host_bp_seqs.fa");
+    std::ofstream virus_bp_seqs(workdir + "/virus_bp_seqs.fa");
 
     std::string res_fname = workdir + "/results.txt";
     std::ifstream res_fin(res_fname);
@@ -165,7 +160,7 @@ int main(int argc, char* argv[]) {
         call_t call(line);
 
         char reads_fname[1024];
-        sprintf(reads_fname, "%s/readsx/%d.sorted.bam", workdir.c_str(), call.id);
+        sprintf(reads_fname, "%s/readsx/%d.bam", workdir.c_str(), call.id);
         std::vector<bam1_t*> host_reads = get_redux_reads(reads_fname, call.host_bp.chr);
         std::vector<bam1_t*> virus_reads = get_redux_reads(reads_fname, call.virus_bp.chr);
 
@@ -174,7 +169,7 @@ int main(int argc, char* argv[]) {
         host_reg[call.host_bp.end-call.host_bp.start] = '\0';
 
         std::string consensus_host = build_consensus(host_reg, call.host_bp.start, host_reads);
-        host_bp_seqs << ">" << call.id << "\n";
+        host_bp_seqs << ">" << call.id << "_" << (call.host_bp.rev ? "L" : "R") << "\n";
         host_bp_seqs << consensus_host << std::endl;
 
         // if circular call, move reads to second half
@@ -199,7 +194,7 @@ int main(int argc, char* argv[]) {
         virus_reg[virus_end-virus_start] = '\0';
 
         std::string consensus_virus = build_consensus(virus_reg, call.virus_bp.start, virus_reads);
-        virus_bp_seqs << ">" << call.id << "\n";
+        virus_bp_seqs << ">" << call.id << "_" << (call.virus_bp.rev ? "L" : "R") << "\n";
         virus_bp_seqs << consensus_virus << std::endl;
     }
 

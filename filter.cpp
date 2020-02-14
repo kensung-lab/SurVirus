@@ -175,15 +175,6 @@ int main(int argc, char* argv[]) {
             bool same_vseq = v_aln.query_end-v_aln.query_begin >= v_query.length()*0.8;
 
             if (same_hseq && same_vseq) {
-//                if (hseq_j.length() > hseq_i.length()) {
-//                    std::cerr << "SWAPPING " << accepted_calls[i].id << " " << accepted_calls[j].id << std::endl;
-//                    accepted_calls[i].host_bp = accepted_calls[j].host_bp;
-//                    host_virus_bp_seqs[i].first = host_virus_bp_seqs[j].first;
-//                }
-//                if (vseq_j.length() > vseq_i.length()) {
-//                    accepted_calls[i].virus_bp = accepted_calls[j].virus_bp;
-//                    host_virus_bp_seqs[i].second = host_virus_bp_seqs[j].second;
-//                }
                 accepted_calls[j].removed = true;
                 break;
             }

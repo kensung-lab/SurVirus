@@ -19,8 +19,6 @@ cmd_parser.add_argument('--bwa', default='bwa', help='BWA path.')
 cmd_parser.add_argument('--samtools', help='Samtools path.', default='samtools')
 cmd_parser.add_argument('--bedtools', default='bedtools', help='Bedtools path. Necessary if --wgs is not set and'
                                                                '--coveredRegionsBed is not provided.')
-cmd_parser.add_argument('--bcftools', help='Bcftools path.', default='bcftools')
-cmd_parser.add_argument('--tabix', help='Tabix path.', default='tabix')
 cmd_parser.add_argument('--wgs', action='store_true', help='The reference genome is uniformly covered by reads.'
                                                            'SurVirus needs to sample read pairs, and this option lets'
                                                            'it sample them from all over the genome.')
@@ -320,32 +318,13 @@ remapper_cmd = "./remapper %s %s %s %s > %s/results.txt 2> %s/log.txt" \
                   bam_files_and_workspaces, cmd_args.workdir, cmd_args.workdir)
 execute(remapper_cmd)
 
-
-open("%s/host_bp_seqs.fa" % cmd_args.workdir, 'w').close()
 with open(cmd_args.workdir + "/results.txt") as results_file:
     for line in results_file:
-        id, h_bp, v_bp = line.split()[:3]
-        h_chr, h_strand, h_start, h_end = h_bp.split(':')
-        v_chr, v_strand, v_start, v_end = v_bp.split(':')
-        v_start, v_end = int(v_start), int(v_end)
-
+        id = line.split()[0]
         bam_prefix = "%s/%s" % (readsx, id)
         pysam.sort("-@", str(cmd_args.threads), "-o", "%s.sorted.bam" % bam_prefix, "%s.bam" % bam_prefix)
-        execute("%s index %s" % (cmd_args.samtools, "%s.sorted.bam" % bam_prefix))
-
-        pileup_cmd = "%s mpileup -Ou -f %s %s.sorted.bam | %s call -Oz -mv -o %s.vcf.gz" \
-                     % (cmd_args.bcftools, cmd_args.host_and_virus_reference, bam_prefix, cmd_args.bcftools, bam_prefix)
-        execute(pileup_cmd)
-
-        tabix_cmd = "%s %s.vcf.gz" % (cmd_args.tabix, bam_prefix)
-        execute(tabix_cmd)
-
-        host_seq_id = "%s" % id
-        host_seq_cmd = "%s faidx %s %s:%s-%s | %s consensus %s.vcf.gz | sed 's,>.*,>%s,g' >> %s/host_bp_seqs.fa" \
-                       % (cmd_args.samtools, cmd_args.host_and_virus_reference, h_chr, h_start, h_end, cmd_args.bcftools,
-                          bam_prefix, host_seq_id, cmd_args.workdir)
-        execute(host_seq_cmd)
-
+        os.rename("%s.sorted.bam" % bam_prefix, "%s.bam" % bam_prefix)
+        execute("%s index %s" % (cmd_args.samtools, "%s.bam" % bam_prefix))
 
 bp_consensus_cmd = "./bp_region_consensus_builder %s %s %s %s" \
                    % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, " ".join(bam_workspaces))
