@@ -1,44 +1,24 @@
 #include <iostream>
-#include <fstream>
-#include <sstream>
 #include <vector>
-#include <queue>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
-#include <cassert>
-#include <unistd.h>
 #include <htslib/hts.h>
 #include <htslib/sam.h>
-#include <htslib/kseq.h>
-
-KSEQ_INIT(int, read)
 
 #include "sam_utils.h"
 #include "config.h"
 #include "libs/cptl_stl.h"
+#include "utils.h"
 
 config_t config;
-std::unordered_map<std::string, int> contig_name2id;
+contig_map_t contig_map;
 std::vector<int> tid_to_contig_id;
 std::unordered_set<std::string> virus_names;
 
 std::mutex mtx;
 
-const int MAX_BUFFER_SIZE = 100;
-
-
-bam1_t* add_to_queue(std::deque<bam1_t*>& q, bam1_t* o, int size_limit) {
-    bam1_t* t = NULL;
-    while (q.size() >= size_limit) {
-        t = q.front();
-        q.pop_front();
-    }
-    q.push_back(o);
-    return t;
-}
-
-void categorize(int id, std::string contig, std::string bam_fname, int target_len,
+void categorize(int id, std::string contig, std::string bam_fname,
                 std::vector<bam1_t*>* reads, std::vector<bam1_t*>* anchor_reads,
                 std::unordered_map<std::string, std::pair<char, char> >& good_clips) {
 
@@ -48,40 +28,32 @@ void categorize(int id, std::string contig, std::string bam_fname, int target_le
     hts_idx_t* idx = bam_file_open->idx;
     bam_hdr_t* header = bam_file_open->header;
 
-    char region[1000];
-    sprintf(region, "%s:%d-%d", contig.c_str(), 1, target_len);
-
-    mtx.lock();
-    std::cout << "Categorizing " << region << std::endl;
-    mtx.unlock();
-
-    hts_itr_t* iter = sam_itr_querys(idx, header, region);
     bam1_t* read = bam_init1();
 
-    int i = 0;
+    hts_itr_t* iter = sam_itr_querys(idx, header, contig.c_str());
     while (sam_itr_next(bam_file, iter, read) >= 0) {
-        if (!is_unmapped(read)) {
-            if (good_clips.count(bam_get_qname(read))) {
-                std::pair<char, char> good_clip_flag = good_clips[bam_get_qname(read)];
-                bool is_first_read = read->core.flag & BAM_FREAD1;
+        if (is_unmapped(read)) continue;
+
+        if (good_clips.count(bam_get_qname(read))) {
+            std::pair<char, char> good_clip_flag = good_clips[bam_get_qname(read)];
+            bool is_first_read = read->core.flag & BAM_FREAD1;
+            mtx.lock();
+            if ((is_first_read && good_clip_flag.first) || (!is_first_read && good_clip_flag.second)) {
+                uint8_t dir = is_first_read ? good_clip_flag.first : good_clip_flag.second;
+                bam1_t* copy = bam_dup1(read);
+                bam_aux_append(copy, "CD", 'A', 1, &dir);
+                anchor_reads->push_back(copy);
+            } else {
+                reads->push_back(bam_dup1(read));
+            }
+            mtx.unlock();
+        } else if (is_dc_pair(read) && !is_poly_ACGT(read, true)) {
+            std::string target_name = contig;
+            std::string mate_target_name = header->target_name[read->core.mtid];
+            if (virus_names.count(target_name) != virus_names.count(mate_target_name)) {
                 mtx.lock();
-                if ((is_first_read && good_clip_flag.first) || (!is_first_read && good_clip_flag.second)) {
-                    uint8_t dir = is_first_read ? good_clip_flag.first : good_clip_flag.second;
-                    bam1_t* copy = bam_dup1(read);
-                    bam_aux_append(copy, "CD", 'A', 1, &dir);
-                    anchor_reads->push_back(copy);
-                } else {
-                    reads->push_back(bam_dup1(read));
-                }
+                reads->push_back(bam_dup1(read));
                 mtx.unlock();
-            } else if (is_dc_pair(read) && !is_poly_ACGT(read, true)) {
-                std::string target_name = contig;
-                std::string mate_target_name = header->target_name[read->core.mtid];
-                if (virus_names.count(target_name) != virus_names.count(mate_target_name)) {
-                    mtx.lock();
-                    reads->push_back(bam_dup1(read));
-                    mtx.unlock();
-                }
             }
         }
     }
@@ -120,16 +92,10 @@ int main(int argc, char* argv[]) {
 
     std::string workdir = argv[2];
     std::string workspace = argv[3];
-    std::string bam_fname = workspace + "/retained-pairs-remapped.sorted.bam";
+    std::string bam_fname = workspace + "/retained-pairs.remapped.cs.bam";
 
     config = parse_config(workdir + "/config.txt");
-
-    // we explicitly store contig_name2id to make sure the order is consistent among all execs
-    std::ifstream contig_map_fin(workdir + "/contig_map");
-    std::string contig_name; int contig_id;
-    while (contig_map_fin >> contig_name >> contig_id) {
-        contig_name2id[contig_name] = contig_id;
-    }
+    contig_map = contig_map_t(workdir);
 
     ctpl::thread_pool thread_pool(config.threads);
 
@@ -140,7 +106,7 @@ int main(int argc, char* argv[]) {
     std::unordered_map<std::string, std::pair<char, char> > good_clips;
     bam1_t* read = bam_init1();
 
-    open_samFile_t* host_clips_file = open_samFile((workspace + "/host-clips.sorted.bam").data(), true);
+    open_samFile_t* host_clips_file = open_samFile((workspace + "/host-clips.cs.bam").data(), true);
     while (sam_read1(host_clips_file->file, host_clips_file->header, read) >= 0) {
         if (virus_names.count(host_clips_file->header->target_name[read->core.tid]) ) { // seq was mapped to virus
             std::string clip_name = bam_get_qname(read);
@@ -155,7 +121,7 @@ int main(int argc, char* argv[]) {
     }
     close_samFile(host_clips_file);
 
-    open_samFile_t* virus_clips_file = open_samFile((workspace + "/virus-clips.sorted.bam").data(), true);
+    open_samFile_t* virus_clips_file = open_samFile((workspace + "/virus-clips.cs.bam").data(), true);
     while (sam_read1(virus_clips_file->file, virus_clips_file->header, read) >= 0) {
         if (!virus_names.count(virus_clips_file->header->target_name[read->core.tid]) ) { // seq was mapped to host
             std::string clip_name = bam_get_qname(read);
@@ -177,7 +143,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::future<void> > futures;
     for (int i = 0; i < header->n_targets; i++) {
         bool is_virus = virus_names.count(header->target_name[i]);
-        std::future<void> future = thread_pool.push(categorize, header->target_name[i], bam_fname, header->target_len[i],
+        std::future<void> future = thread_pool.push(categorize, header->target_name[i], bam_fname,
                                                     is_virus ? &virus_side_reads : &host_side_reads,
                                                     is_virus ? &virus_anchors : &host_anchors, good_clips);
         futures.push_back(std::move(future));

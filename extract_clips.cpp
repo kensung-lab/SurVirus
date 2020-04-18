@@ -25,20 +25,8 @@ std::unordered_set<std::string> virus_names;
 
 std::mutex mtx, mtx_lc, mtx_rc;
 
-const int MAX_BUFFER_SIZE = 100;
 
-
-bam1_t* add_to_queue(std::deque<bam1_t*>& q, bam1_t* o, int size_limit) {
-    bam1_t* t = NULL;
-    while (q.size() >= size_limit) {
-        t = q.front();
-        q.pop_front();
-    }
-    q.push_back(o);
-    return t;
-}
-
-void extract(int id, std::string contig, std::string bam_fname, int target_len, std::vector<bam1_t *> *lc_anchors,
+void extract(int id, std::string contig, std::string bam_fname, std::vector<bam1_t *> *lc_anchors,
              std::vector<bam1_t *> *rc_anchors) {
 
     open_samFile_t* bam_file_open = open_samFile(bam_fname.data());
@@ -47,14 +35,7 @@ void extract(int id, std::string contig, std::string bam_fname, int target_len, 
     hts_idx_t* idx = bam_file_open->idx;
     bam_hdr_t* header = bam_file_open->header;
 
-    char region[1000];
-    sprintf(region, "%s:%d-%d", contig.c_str(), 1, target_len);
-
-    mtx.lock();
-    std::cout << "Extracting clips for " << region << std::endl;
-    mtx.unlock();
-
-    hts_itr_t* iter = sam_itr_querys(idx, header, region);
+    hts_itr_t* iter = sam_itr_querys(idx, header, contig.c_str());
     bam1_t* read = bam_init1();
 
     int i = 0;
@@ -92,7 +73,7 @@ int main(int argc, char* argv[]) {
 
     std::string workdir = argv[2];
     std::string workspace = argv[3];
-    std::string bam_fname = workspace + "/retained-pairs-remapped.sorted.bam";
+    std::string bam_fname = workspace + "/retained-pairs.remapped.cs.bam";
 
     config = parse_config(workdir + "/config.txt");
 
@@ -115,7 +96,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::future<void> > futures;
     for (int i = 0; i < header->n_targets; i++) {
         bool is_virus = virus_names.count(header->target_name[i]);
-        std::future<void> future = thread_pool.push(extract, header->target_name[i], bam_fname, header->target_len[i],
+        std::future<void> future = thread_pool.push(extract, header->target_name[i], bam_fname,
                                                     is_virus ? &lc_virus_anchors : &lc_host_anchors,
                                                     is_virus ? &rc_virus_anchors : &rc_host_anchors);
         futures.push_back(std::move(future));

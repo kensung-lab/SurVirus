@@ -1,15 +1,13 @@
 #include <iostream>
-#include <fstream>
 #include <vector>
-#include <unistd.h>
+#include <unordered_set>
+#include <unordered_map>
 #include <htslib/sam.h>
-#include <htslib/kseq.h>
-#include <cassert>
-
-KSEQ_INIT(int, read)
 
 #include "sam_utils.h"
 #include "utils.h"
+#include "libs/ssw.h"
+#include "libs/ssw_cpp.h"
 
 
 std::vector<bam1_t*> get_redux_reads(char* reads_fname, std::string& target_chr) {
@@ -132,11 +130,19 @@ std::string build_consensus(char* ref_region, int start, std::vector<bam1_t*>& r
     return consensus;
 }
 
+bool is_good_alignment(StripedSmithWaterman::Alignment& alignment, int query_len) {
+    int query_aln_len = alignment.query_end-alignment.query_begin;
+    return query_aln_len >= query_len*0.75; // at least 75% aligned
+}
+
 int main(int argc, char* argv[]) {
 
     std::string host_reference_fname  = argv[1];
     std::string virus_reference_fname  = argv[2];
     std::string workdir = argv[3];
+
+    config_t config = parse_config(workdir + "/config.txt");
+    config.min_sc_size = 10;
 
     // find global max_is
     int max_is = 0;
@@ -147,14 +153,18 @@ int main(int argc, char* argv[]) {
     }
 
     chr_seqs_map_t chr_seqs;
-    read_fasta_into_map(chr_seqs, host_reference_fname);
-    read_fasta_into_map(chr_seqs, virus_reference_fname, true);
+    chr_seqs.read_fasta_into_map(host_reference_fname, false, false);
+    chr_seqs.read_fasta_into_map(virus_reference_fname, true, true);
 
     std::ofstream host_bp_seqs(workdir + "/host_bp_seqs.fa");
     std::ofstream virus_bp_seqs(workdir + "/virus_bp_seqs.fa");
 
     std::string res_fname = workdir + "/results.txt";
     std::ifstream res_fin(res_fname);
+
+    std::string res_remapped_fname = workdir + "/results.remapped.txt";
+    std::ofstream res_remapped_fout(res_remapped_fname);
+
     std::string line;
     while (std::getline(res_fin, line)) {
         call_t call(line);
@@ -164,40 +174,133 @@ int main(int argc, char* argv[]) {
         std::vector<bam1_t*> host_reads = get_redux_reads(reads_fname, call.host_bp.chr);
         std::vector<bam1_t*> virus_reads = get_redux_reads(reads_fname, call.virus_bp.chr);
 
-        char host_reg[10000];
-        strncpy(host_reg, chr_seqs[call.host_bp.chr]->seq+call.host_bp.start, call.host_bp.end-call.host_bp.start);
-        host_reg[call.host_bp.end-call.host_bp.start] = '\0';
-
-        std::string consensus_host = build_consensus(host_reg, call.host_bp.start, host_reads);
         host_bp_seqs << ">" << call.id << "_" << (call.host_bp.rev ? "L" : "R") << "\n";
+        std::string consensus_host = "A";
+        if (!host_reads.empty()) {
+            char host_reg[10000];
+            strncpy(host_reg, chr_seqs.get_seq(call.host_bp.chr)+call.host_bp.start, call.host_bp.end-call.host_bp.start);
+            host_reg[call.host_bp.end-call.host_bp.start] = '\0';
+            consensus_host = build_consensus(host_reg, call.host_bp.start, host_reads);
+        }
         host_bp_seqs << consensus_host << std::endl;
 
-        // if circular call, move reads to second half
-        int virus_len = chr_seqs[call.virus_bp.chr]->len;
-        if (chr_seqs[call.virus_bp.chr]->circular) virus_len = 2*virus_len/3;
-        if ((!call.virus_bp.rev && call.virus_bp.pos() < max_is) || (call.virus_bp.rev && call.virus_bp.pos() > virus_len-max_is)) {
+        virus_bp_seqs << ">" << call.id << "_" << (call.virus_bp.rev ? "L" : "R") << "\n";
+        std::string consensus_virus = "A";
+        if (!virus_reads.empty()) {
+            // if circular call, move reads to second half
+            int virus_len = chr_seqs.get_original_len(call.virus_bp.chr);
+            if ((!call.virus_bp.rev && call.virus_bp.pos() < max_is) || (call.virus_bp.rev && call.virus_bp.pos() > virus_len-max_is)) {
+                for (bam1_t* read : virus_reads) {
+                    if (bam_endpos(read) <= max_is) {
+                        read->core.pos += virus_len;
+                    }
+                }
+            }
+
+            int virus_start = 1000000000, virus_end = 0;
             for (bam1_t* read : virus_reads) {
-                if (bam_endpos(read) <= max_is) {
-                    read->core.pos += virus_len;
+                virus_start = std::min(virus_start, read->core.pos);
+                virus_end = std::max(virus_end, bam_endpos(read));
+            }
+
+            char virus_reg[10000];
+            strncpy(virus_reg, chr_seqs.get_seq(call.virus_bp.chr)+virus_start, virus_end-virus_start);
+            virus_reg[virus_end-virus_start] = '\0';
+            consensus_virus = build_consensus(virus_reg, call.virus_bp.start, virus_reads);
+        }
+        virus_bp_seqs << consensus_virus << std::endl;
+
+
+
+        /* == remap reads == */
+
+        StripedSmithWaterman::Aligner aligner(1, 4, 6, 1, false);
+        StripedSmithWaterman::Filter filter;
+
+        if (call.host_bp.rev) get_rc(consensus_host);
+        if (!call.virus_bp.rev) get_rc(consensus_virus);
+        int junction = consensus_host.length();
+        std::string full_region = consensus_host + consensus_virus;
+
+        std::unordered_map<std::string, std::pair<int, int> > pairs_ref_ends;
+        for (bam1_t* read : host_reads) { // initialise pairs_ref_ends
+            pairs_ref_ends[bam_get_qname(read)] = {full_region.length(), 0};
+        }
+
+        uint64_t tot_score = 0, tot_bases = 0;
+
+        // map host reads
+        std::unordered_set<std::string> good_host_reads;
+        std::vector<std::string> splitreads;
+        for (bam1_t* read : host_reads) {
+            if (!is_primary(read)) continue;
+            if (is_low_complexity(read, false, get_left_clip_len(read), read->core.l_qseq-get_right_clip_len(read)))
+                continue;
+
+            StripedSmithWaterman::Alignment alignment;
+            std::string read_seq = get_sequence(read);
+            if (call.host_bp.rev) get_rc(read_seq);
+            aligner.Align(read_seq.c_str(), full_region.c_str(), full_region.length(), filter, &alignment, 0);
+
+            std::string qname = bam_get_qname(read);
+            std::pair<int, int>& pre = pairs_ref_ends[qname];
+            pre.first = std::min(pre.first, alignment.ref_begin);
+            pre.second = std::max(pre.second, alignment.ref_end);
+
+            if (is_good_alignment(alignment, read_seq.length())) {
+                good_host_reads.insert(qname);
+                tot_score += alignment.sw_score;
+                tot_bases += std::max(alignment.ref_end-alignment.ref_begin, alignment.query_end-alignment.query_begin);
+
+                if (alignment.ref_begin <= junction-config.min_sc_size && junction+config.min_sc_size <= alignment.ref_end) {
+                    splitreads.push_back(qname);
                 }
             }
         }
 
-        int virus_start = 1000000000, virus_end = 0;
+        // map virus reads
+        std::unordered_set<std::string> good_pairs;
         for (bam1_t* read : virus_reads) {
-            virus_start = std::min(virus_start, read->core.pos);
-            virus_end = std::max(virus_end, bam_endpos(read));
+            if (!is_primary(read)) continue;
+
+            std::cerr << bam_get_qname(read) << " " << is_low_complexity(read, false, get_left_clip_len(read), read->core.l_qseq-get_right_clip_len(read)) << std::endl;
+            if (is_low_complexity(read, false, get_left_clip_len(read), read->core.l_qseq-get_right_clip_len(read)))
+                continue;
+            if (good_host_reads.count(bam_get_qname(read)) == 0) continue;
+
+            StripedSmithWaterman::Alignment alignment;
+            std::string read_seq = get_sequence(read);
+            if (!call.virus_bp.rev) get_rc(read_seq);
+            aligner.Align(read_seq.c_str(), full_region.c_str(), full_region.length(), filter, &alignment, 0);
+
+            std::string qname = bam_get_qname(read);
+            std::pair<int, int>& pre = pairs_ref_ends[qname];
+            pre.first = std::min(pre.first, alignment.ref_begin);
+            pre.second = std::max(pre.second, alignment.ref_end);
+
+            if (is_good_alignment(alignment, read_seq.length())) {
+                std::string qname = bam_get_qname(read);
+                if (pre.second-pre.first <= max_is) {
+                    good_pairs.insert(qname);
+                }
+                tot_score += alignment.sw_score;
+                tot_bases += std::max(alignment.ref_end-alignment.ref_begin, alignment.query_end-alignment.query_begin);
+
+                if (alignment.ref_begin <= junction-config.min_sc_size && junction+config.min_sc_size <= alignment.ref_end) {
+                    splitreads.push_back(qname);
+                }
+            }
         }
 
-        char virus_reg[10000];
-        strncpy(virus_reg, chr_seqs[call.virus_bp.chr]->seq+virus_start, virus_end-virus_start);
-        virus_reg[virus_end-virus_start] = '\0';
+        call.good_pairs = good_pairs.size();
+        call.split_reads = splitreads.size();
+        call.host_pbs = call.virus_pbs = tot_score/double(tot_bases);
 
-        std::string consensus_virus = build_consensus(virus_reg, call.virus_bp.start, virus_reads);
-        virus_bp_seqs << ">" << call.id << "_" << (call.virus_bp.rev ? "L" : "R") << "\n";
-        virus_bp_seqs << consensus_virus << std::endl;
+        res_remapped_fout << call.to_string() << std::endl;
     }
 
     host_bp_seqs.close();
     virus_bp_seqs.close();
+
+    res_remapped_fout.close();
 }

@@ -9,7 +9,7 @@ GEN_DIST_SIZE = 10000
 MAX_ACCEPTABLE_IS = 20000
 
 cmd_parser = argparse.ArgumentParser(description='SurVirus, a virus integration caller.')
-cmd_parser.add_argument('input_files', help='Input bam files, separated by a semi-colon.')
+cmd_parser.add_argument('input_files', help='Input bam files, separated by a comma.')
 cmd_parser.add_argument('workdir', help='Working directory for SurVirus to use.')
 cmd_parser.add_argument('host_reference', help='Reference of the host organism in FASTA format.')
 cmd_parser.add_argument('virus_reference', help='References of a list of viruses in FASTA format.')
@@ -19,6 +19,7 @@ cmd_parser.add_argument('--bwa', default='bwa', help='BWA path.')
 cmd_parser.add_argument('--samtools', help='Samtools path.', default='samtools')
 cmd_parser.add_argument('--bedtools', default='bedtools', help='Bedtools path. Necessary if --wgs is not set and'
                                                                '--coveredRegionsBed is not provided.')
+cmd_parser.add_argument('--dust', help='Dust path.', default='dust')
 cmd_parser.add_argument('--wgs', action='store_true', help='The reference genome is uniformly covered by reads.'
                                                            'SurVirus needs to sample read pairs, and this option lets'
                                                            'it sample them from all over the genome.')
@@ -26,7 +27,7 @@ cmd_parser.add_argument('--coveredRegionsBed', default='',
                         help='In case only a few regions of the genome are covered by reads, this directs SurVirus'
                              'on where to sample reads. In case --wgs is not used and this is not provided,'
                              'SurVirus will compute such file by itself.')
-cmd_parser.add_argument('--minClipSize', type=int, default=30, help='Min size for a clip to be considered.')
+cmd_parser.add_argument('--minClipSize', type=int, default=20, help='Min size for a clip to be considered.')
 cmd_parser.add_argument('--maxSCDist', type=int, default=10, help='Max SC distance.')
 cmd_parser.add_argument('--fq', action='store_true', help='Input is in fastq format.')
 cmd_args = cmd_parser.parse_args()
@@ -40,19 +41,19 @@ def execute(cmd):
 bam_names = cmd_args.input_files.split(',')
 if cmd_args.fq:
     if len(bam_names) != 2:
-        print "Two semi-colon separated fastq files are required."
+        print "Two colon-separated fastq files are required."
         exit(1)
 
     bwa_cmd = "%s mem -t %d %s %s %s | %s view -b -F 2304 > %s/input.bam" % \
               (cmd_args.bwa, cmd_args.threads, cmd_args.host_reference, bam_names[0], bam_names[1], cmd_args.samtools, cmd_args.workdir)
     execute(bwa_cmd)
 
-    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/input.sorted.bam" % cmd_args.workdir, "%s/input.bam" % cmd_args.workdir)
+    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/input.cs.bam" % cmd_args.workdir, "%s/input.bam" % cmd_args.workdir)
 
-    index_cmd = "%s index %s/input.sorted.bam" % (cmd_args.samtools, cmd_args.workdir)
+    index_cmd = "%s index %s/input.cs.bam" % (cmd_args.samtools, cmd_args.workdir)
     execute(index_cmd)
 
-    bam_names = ["%s/input.sorted.bam" % cmd_args.workdir]
+    bam_names = ["%s/input.cs.bam" % cmd_args.workdir]
 
 bam_files = [pysam.AlignmentFile(bam_name) for bam_name in bam_names]
 
@@ -134,8 +135,6 @@ for file_index, bam_file in enumerate(bam_files):
     for e in random_positions:
         if len(general_dist) > GEN_DIST_SIZE: break
 
-        print len(general_dist)
-
         chr, pos = e
         rnd_i += 1
 
@@ -186,15 +185,32 @@ config_file.write("read_len %d\n" % max_read_len)
 config_file.close();
 
 
-print "Regenerating random genomic positions..."
-random_positions = []
-for i in range(1,GEN_DIST_SIZE*2):
-    if i % 100000 == 0: print i, "random positions generated."
-    random_positions.append(rand_pos_gen.next())
+def map_clips(prefix, reference):
+    bwa_aln_cmd = "%s aln -t %d %s %s.fa -f %s.sai" \
+                  % (cmd_args.bwa, cmd_args.threads, reference, prefix, prefix)
+    bwa_samse_cmd = "%s samse %s %s.sai %s.fa | %s view -b -F 2304 > %s.full.bam" \
+                    % (cmd_args.bwa, reference, prefix, prefix, cmd_args.samtools, prefix)
+    execute(bwa_aln_cmd)
+    execute(bwa_samse_cmd)
 
-with open("%s/random_pos.txt" % cmd_args.workdir, "w") as random_pos_file:
-    for random_pos in random_positions:
-        random_pos_file.write("%s %d\n" % random_pos)
+    filter_unmapped_cmd = "%s view -b -F 4 %s.full.bam > %s.aln.bam" \
+                          % (cmd_args.samtools, prefix, prefix)
+    execute(filter_unmapped_cmd)
+
+    dump_unmapped_fa = "%s fasta -f 4 %s.full.bam > %s.unmapped.fa" \
+                       % (cmd_args.samtools, prefix, prefix)
+    execute(dump_unmapped_fa)
+
+    bwa_mem_cmd = "%s mem -t %d %s %s.unmapped.fa | %s view -b -F 2308 > %s.mem.bam" \
+                  % (cmd_args.bwa, cmd_args.threads, reference, prefix,
+                     cmd_args.samtools, prefix)
+    execute(bwa_mem_cmd)
+
+    cat_cmd = "%s cat %s.aln.bam %s.mem.bam -o %s.bam" \
+              % (cmd_args.samtools, prefix, prefix, prefix)
+    execute(cat_cmd)
+
+    pysam.sort("-@", str(cmd_args.threads), "-o", "%s.cs.bam" % prefix, "%s.bam" % prefix)
 
 
 bam_workspaces = []
@@ -209,20 +225,12 @@ for file_index, bam_file in enumerate(bam_files):
     filter_by_qname_cmd = "./filter_by_qname %s %s %s" % (bam_file.filename, cmd_args.workdir, bam_workspace)
     execute(filter_by_qname_cmd)
 
-    samtools_sortbyqname_cmd = "%s sort -n -@ %d -o %s/retained-pairs.qname-sorted.bam %s/retained-pairs.bam" % \
-                               (cmd_args.samtools, cmd_args.threads, bam_workspace, bam_workspace)
-    execute(samtools_sortbyqname_cmd)
-
-    samtools_dump_cmd = "%s fastq -1 %s/retained-pairs_1.fq -2 %s/retained-pairs_2.fq %s/retained-pairs.qname-sorted.bam" % \
-                        (cmd_args.samtools, bam_workspace, bam_workspace, bam_workspace)
-    execute(samtools_dump_cmd)
-
-    bwa_cmd = "%s mem -t %d %s %s/retained-pairs_1.fq %s/retained-pairs_2.fq | %s view -b -F 2304 > %s/retained-pairs-remapped.bam" \
+    bwa_cmd = "%s mem -t %d %s %s/retained-pairs_1.fq %s/retained-pairs_2.fq | %s view -b -F 2304 > %s/retained-pairs.remapped.bam" \
               % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, \
                  bam_workspace, bam_workspace, cmd_args.samtools, bam_workspace)
     execute(bwa_cmd)
 
-    samtools_sort_cmd = "%s sort -@ %d %s/retained-pairs-remapped.bam -o %s/retained-pairs-remapped.sorted.bam" \
+    samtools_sort_cmd = "%s sort -@ %d %s/retained-pairs.remapped.bam -o %s/retained-pairs.remapped.cs.bam" \
                         % (cmd_args.samtools, cmd_args.threads, bam_workspace, bam_workspace)
     execute(samtools_sort_cmd)
 
@@ -230,82 +238,30 @@ for file_index, bam_file in enumerate(bam_files):
     execute(extract_clips_cmd)
 
     # map virus clips
-    bwa_aln_cmd = "%s aln -t %d %s %s/virus-clips.fa -f %s/virus-clips.sai" \
-                  % (cmd_args.bwa, cmd_args.threads, cmd_args.host_reference, bam_workspace, bam_workspace)
-    bwa_samse_cmd = "%s samse %s %s/virus-clips.sai %s/virus-clips.fa | %s view -b -F 2304 > %s/virus-clips.full.bam" \
-                    % (cmd_args.bwa, cmd_args.host_reference, bam_workspace, bam_workspace, cmd_args.samtools, bam_workspace)
-    execute(bwa_aln_cmd)
-    execute(bwa_samse_cmd)
-
-    filter_unmapped_cmd = "%s view -b -F 4 %s/virus-clips.full.bam > %s/virus-clips.aln.bam" \
-                          % (cmd_args.samtools, bam_workspace, bam_workspace)
-    execute(filter_unmapped_cmd)
-
-    dump_unmapped_fa = "%s fasta -f 4 %s/virus-clips.full.bam > %s/virus-clips.unmapped.fa" \
-                       % (cmd_args.samtools, bam_workspace, bam_workspace)
-    execute(dump_unmapped_fa)
-
-    bwa_mem_cmd = "%s mem -t %d %s %s/virus-clips.unmapped.fa | %s view -b -F 2308 > %s/virus-clips.mem.bam" \
-              % (cmd_args.bwa, cmd_args.threads, cmd_args.host_reference, bam_workspace,
-                 cmd_args.samtools, bam_workspace)
-    execute(bwa_mem_cmd)
-
-    cat_cmd = "%s cat %s/virus-clips.aln.bam %s/virus-clips.mem.bam -o %s/virus-clips.bam" \
-              % (cmd_args.samtools, bam_workspace, bam_workspace, bam_workspace)
-    execute(cat_cmd)
+    map_clips("%s/virus-clips" % bam_workspace, cmd_args.host_reference)
 
     # map host clips
-    bwa_aln_cmd = "%s aln -t %d %s %s/host-clips.fa -f %s/host-clips.sai" \
-                  % (cmd_args.bwa, cmd_args.threads, cmd_args.virus_reference, bam_workspace, bam_workspace)
-    bwa_samse_cmd = "%s samse %s %s/host-clips.sai %s/host-clips.fa | %s view -b -F 2304 > %s/host-clips.full.bam" \
-                    % (cmd_args.bwa, cmd_args.virus_reference, bam_workspace, bam_workspace, cmd_args.samtools,
-                       bam_workspace)
-    execute(bwa_aln_cmd)
-    execute(bwa_samse_cmd)
-
-    filter_unmapped_cmd = "%s view -b -F 4 %s/host-clips.full.bam > %s/host-clips.aln.bam" \
-                          % (cmd_args.samtools, bam_workspace, bam_workspace)
-    execute(filter_unmapped_cmd)
-
-    dump_unmapped_fa = "%s fasta -f 4 %s/host-clips.full.bam > %s/host-clips.unmapped.fa" \
-                       % (cmd_args.samtools, bam_workspace, bam_workspace)
-    execute(dump_unmapped_fa)
-
-    bwa_mem_cmd = "%s mem -t %d %s %s/host-clips.unmapped.fa | %s view -b -F 2308 > %s/host-clips.mem.bam" \
-                  % (cmd_args.bwa, cmd_args.threads, cmd_args.virus_reference, bam_workspace,
-                     cmd_args.samtools, bam_workspace)
-    execute(bwa_mem_cmd)
-
-    cat_cmd = "%s cat %s/host-clips.aln.bam %s/host-clips.mem.bam -o %s/host-clips.bam" \
-              % (cmd_args.samtools, bam_workspace, bam_workspace, bam_workspace)
-    execute(cat_cmd)
-
-    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-clips.sorted.bam" % bam_workspace,
-               "%s/host-clips.bam" % bam_workspace)
-    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-clips.sorted.bam" % bam_workspace,
-               "%s/virus-clips.bam" % bam_workspace)
+    map_clips("%s/host-clips" % bam_workspace, cmd_args.virus_reference)
 
     read_categorizer_cmd = "./reads_categorizer %s %s %s" % (cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
     execute(read_categorizer_cmd)
+    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-anchors.cs.bam" % bam_workspace,
+             "%s/host-anchors.bam" % bam_workspace)
+    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-anchors.cs.bam" % bam_workspace,
+               "%s/virus-anchors.bam" % bam_workspace)
 
     bwa_cmd = "%s mem -t %d -h %d %s %s/virus-side.fq | %s view -b -F 2308 > %s/virus-side.bam" \
               % (cmd_args.bwa, cmd_args.threads, n_viruses, cmd_args.host_and_virus_reference, bam_workspace,
                  cmd_args.samtools, bam_workspace)
     execute(bwa_cmd)
+    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-side.cs.bam" % bam_workspace, "%s/virus-side.bam" % bam_workspace)
 
     bwa_cmd = "%s mem -t %d -h 100 %s %s/host-side.fq | %s view -b -F 2308 > %s/host-side.bam" \
               % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, bam_workspace,
                  cmd_args.samtools, bam_workspace)
     execute(bwa_cmd)
+    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-side.cs.bam" % bam_workspace, "%s/host-side.bam" % bam_workspace)
 
-    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-side.sorted.bam" % bam_workspace,
-               "%s/host-side.bam" % bam_workspace)
-    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-side.sorted.bam" % bam_workspace,
-               "%s/virus-side.bam" % bam_workspace)
-    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-anchors.sorted.bam" % bam_workspace,
-             "%s/host-anchors.bam" % bam_workspace)
-    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/virus-anchors.sorted.bam" % bam_workspace,
-               "%s/virus-anchors.bam" % bam_workspace)
 
 readsx = cmd_args.workdir + "/readsx"
 if not os.path.exists(readsx):
@@ -313,24 +269,42 @@ if not os.path.exists(readsx):
 
 
 bam_files_and_workspaces = " ".join([bam_files[i].filename + " " + bam_workspaces[i] for i in xrange(len(bam_workspaces))])
+bam_workspaces_str = " ".join(bam_workspaces)
+
+merge_retained_reads_cmd = "./merge_retained_reads %s %s" % (cmd_args.workdir, bam_files_and_workspaces)
+execute(merge_retained_reads_cmd)
+
+build_rr_associations_cmd = "./build_region-reads_associations %s %s %s %s" \
+                            % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, bam_workspaces_str)
+execute(build_rr_associations_cmd)
+
 remapper_cmd = "./remapper %s %s %s %s > %s/results.txt 2> %s/log.txt" \
                % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir,
-                  bam_files_and_workspaces, cmd_args.workdir, cmd_args.workdir)
+                  bam_workspaces_str, cmd_args.workdir, cmd_args.workdir)
 execute(remapper_cmd)
 
 with open(cmd_args.workdir + "/results.txt") as results_file:
     for line in results_file:
         id = line.split()[0]
         bam_prefix = "%s/%s" % (readsx, id)
-        pysam.sort("-@", str(cmd_args.threads), "-o", "%s.sorted.bam" % bam_prefix, "%s.bam" % bam_prefix)
-        os.rename("%s.sorted.bam" % bam_prefix, "%s.bam" % bam_prefix)
+        pysam.sort("-@", str(cmd_args.threads), "-o", "%s.cs.bam" % bam_prefix, "%s.bam" % bam_prefix)
+        os.rename("%s.cs.bam" % bam_prefix, "%s.bam" % bam_prefix)
         execute("%s index %s" % (cmd_args.samtools, "%s.bam" % bam_prefix))
 
 bp_consensus_cmd = "./bp_region_consensus_builder %s %s %s %s" \
                    % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, " ".join(bam_workspaces))
 execute(bp_consensus_cmd)
 
+dust_cmd = "%s %s/host_bp_seqs.fa > %s/host_bp_seqs.masked.fa" % (cmd_args.dust, cmd_args.workdir, cmd_args.workdir)
+execute(dust_cmd)
+
+dust_cmd = "%s %s/virus_bp_seqs.fa > %s/virus_bp_seqs.masked.fa" % (cmd_args.dust, cmd_args.workdir, cmd_args.workdir)
+execute(dust_cmd)
+
 filter_cmd = "./filter %s > %s/results.t1.txt" % (cmd_args.workdir, cmd_args.workdir)
+execute(filter_cmd)
+
+filter_cmd = "./filter %s --remapped > %s/results.remapped.t1.txt" % (cmd_args.workdir, cmd_args.workdir)
 execute(filter_cmd)
 
 filter_cmd = "./filter %s --print-rejected > %s/results.discarded.txt" % (cmd_args.workdir, cmd_args.workdir)

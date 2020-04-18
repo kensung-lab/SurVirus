@@ -65,6 +65,16 @@ std::ofstream fout;
 
 std::unordered_set<std::string> host_names;
 
+std::string print(ull kmer, int len) {
+    char s[KMER_LEN];
+    s[len] = '\0';
+    while (len > 0) {
+        len--;
+        s[len] = bm_nucl[kmer%4];
+        kmer /= 4;
+    }
+    return s;
+}
 
 inline ull mask(ull kmer, int seg_n) {
     ull first_n_segs_mask = (1ll << SEG_BITS*seg_n)-1;
@@ -88,17 +98,6 @@ inline bool valid_kmer(ull kmer, int len) {
 }
 
 
-std::string print(ull kmer, int len) {
-    char s[KMER_LEN];
-    s[len] = '\0';
-    while (len > 0) {
-        len--;
-        s[len] = bm_nucl[kmer%4];
-        kmer /= 4;
-    }
-    return s;
-}
-
 void index_seq(char* seq, size_t len) {
     ull kmer = 0;
     for (int i = 0; i < len; i++) {
@@ -117,23 +116,15 @@ void index_seq(char* seq, size_t len) {
     }
 }
 
-void isolate(int id, char* bam_fname, int t_num) {
+void isolate(int id, char* bam_fname, char* contig) {
 
     open_samFile_t* bam_file = open_samFile(bam_fname, false);
 
-    std::string t_name = bam_file->header->target_name[t_num];
-    bool is_host = host_names.count(t_name);
-
-    char region[1000];
-    sprintf(region, "%s:%d-%d", t_name.c_str(), 1, bam_file->header->target_len[t_num]);
-
-    mtx.lock();
-    std::cerr << "Detecting relevant pairs for " << bam_file->header->target_name[t_num] << std::endl;
-    mtx.unlock();
-
-    hts_itr_t* iter = sam_itr_querys(bam_file->idx, bam_file->header, region);
+    bool is_host = host_names.count(contig);
 
     bam1_t* read = bam_init1();
+
+    hts_itr_t* iter = sam_itr_querys(bam_file->idx, bam_file->header, contig);
     while (sam_itr_next(bam_file->file, iter, read) >= 0) {
         uint32_t* c = bam_get_cigar(read);
         if (is_host && bam_cigar_op(c[0]) == BAM_CMATCH && read->core.n_cigar == 1) continue; // ignore if all matches
@@ -148,12 +139,12 @@ void isolate(int id, char* bam_fname, int t_num) {
             ull nv = nucl_bm[nucl2chr[bam_seqi(bam_seq, i)]];
             kmer = ((kmer << 2) | nv) & KMER_MASK;
             len++;
+
             if (len >= KMER_LEN) {
                 for (int j = 0; j < NUMBER_OF_SEGS; j++) {
                     ull seg = mask(kmer, j);
                     if (check(seg, j)) {
                         hit++;
-                        len -= 0;
                         break;
                     }
                 }
@@ -222,7 +213,7 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::future<void> > futures;
     for (int t = 0; t < bam_file->header->n_targets; t++) {
-        std::future<void> future = thread_pool.push(isolate, bam_file->file->fn, t);
+        std::future<void> future = thread_pool.push(isolate, bam_file->file->fn, bam_file->header->target_name[t]);
         futures.push_back(std::move(future));
     }
     thread_pool.stop(true);
