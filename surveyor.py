@@ -2,14 +2,10 @@ import argparse, os
 import pysam, pyfaidx
 from random_pos_generator import RandomPositionGenerator
 import numpy as np
-
-
-MAX_READS = 1000
-GEN_DIST_SIZE = 10000
-MAX_ACCEPTABLE_IS = 20000
+import max_is_calc
 
 cmd_parser = argparse.ArgumentParser(description='SurVirus, a virus integration caller.')
-cmd_parser.add_argument('input_files', help='Input bam files, separated by a comma.')
+cmd_parser.add_argument('input_files', help='Input files, separated by a comma.')
 cmd_parser.add_argument('workdir', help='Working directory for SurVirus to use.')
 cmd_parser.add_argument('host_reference', help='Reference of the host organism in FASTA format.')
 cmd_parser.add_argument('virus_reference', help='References of a list of viruses in FASTA format.')
@@ -23,7 +19,7 @@ cmd_parser.add_argument('--dust', help='Dust path.', default='dust')
 cmd_parser.add_argument('--wgs', action='store_true', help='The reference genome is uniformly covered by reads.'
                                                            'SurVirus needs to sample read pairs, and this option lets'
                                                            'it sample them from all over the genome.')
-cmd_parser.add_argument('--coveredRegionsBed', default='',
+cmd_parser.add_argument('--covered_regions_bed', default='',
                         help='In case only a few regions of the genome are covered by reads, this directs SurVirus'
                              'on where to sample reads. In case --wgs is not used and this is not provided,'
                              'SurVirus will compute such file by itself.')
@@ -32,31 +28,15 @@ cmd_parser.add_argument('--maxSCDist', type=int, default=10, help='Max SC distan
 cmd_parser.add_argument('--fq', action='store_true', help='Input is in fastq format.')
 cmd_args = cmd_parser.parse_args()
 
-
 def execute(cmd):
     print "Executing:", cmd
     os.system(cmd)
 
-
-bam_names = cmd_args.input_files.split(',')
+input_names = cmd_args.input_files.split(',')
 if cmd_args.fq:
-    if len(bam_names) != 2:
+    if len(input_names) != 2: # TODO: accept multiple pairs of fq files
         print "Two colon-separated fastq files are required."
         exit(1)
-
-    bwa_cmd = "%s mem -t %d %s %s %s | %s view -b -F 2304 > %s/input.bam" % \
-              (cmd_args.bwa, cmd_args.threads, cmd_args.host_reference, bam_names[0], bam_names[1], cmd_args.samtools, cmd_args.workdir)
-    execute(bwa_cmd)
-
-    pysam.sort("-@", str(cmd_args.threads), "-o", "%s/input.cs.bam" % cmd_args.workdir, "%s/input.bam" % cmd_args.workdir)
-
-    index_cmd = "%s index %s/input.cs.bam" % (cmd_args.samtools, cmd_args.workdir)
-    execute(index_cmd)
-
-    bam_names = ["%s/input.cs.bam" % cmd_args.workdir]
-
-bam_files = [pysam.AlignmentFile(bam_name) for bam_name in bam_names]
-
 
 # Create config file in workdir
 config_file = open(cmd_args.workdir + "/config.txt", "w")
@@ -82,107 +62,48 @@ contig_map.close();
 reference_fa = pyfaidx.Fasta(cmd_args.virus_reference)
 n_viruses = len(reference_fa.keys())
 
+bam_workspaces = []
+if cmd_args.fq:
+    bam_workspace = "%s/bam_0/" % (cmd_args.workdir)
+    if not os.path.exists(bam_workspace):
+        os.makedirs(bam_workspace)
+    bam_workspaces.append(bam_workspace)
 
-sampling_regions = []
-if cmd_args.wgs:
-    reference_fa = pyfaidx.Fasta(cmd_args.host_reference)
-    for k in reference_fa.keys():
-        sampling_regions += [(k, 1, len(reference_fa[k]))]
-else:
-    sampling_regions_file = cmd_args.coveredRegionsBed
-    if not sampling_regions_file:
-        bamtobed_cmd = "%s bamtobed -i %s | cut -f-3 | uniq > %s/reads.bed" % (cmd_args.bedtools, bam_names[0], cmd_args.workdir)
-        print "Executing:", bamtobed_cmd
-        os.system(bamtobed_cmd)
-
-        bedmerge_cmd = "%s merge -i %s/reads.bed -c 1 -o count > %s/reads.merged.bed" \
-                       % (cmd_args.bedtools, cmd_args.workdir, cmd_args.workdir)
-        print "Executing:", bedmerge_cmd
-        os.system(bedmerge_cmd)
-
-        sampling_regions_file = "%s/sampling_regions.bed" % cmd_args.workdir
-        with open(sampling_regions_file, "w") as sr_outf, open("%s/reads.merged.bed" % cmd_args.workdir) as mr_inf:
-            for line in mr_inf:
-                sl = line.split()
-                if int(sl[3]) >= 20:
-                    sr_outf.write("%s\t%s\t%s\n" % tuple(sl[:3]))
-
-    with open(sampling_regions_file) as sr_inf:
-        for line in sr_inf:
-            sl = line.split()
-            sampling_regions += [(sl[0], int(sl[1]), int(sl[2]))]
-
-rand_pos_gen = RandomPositionGenerator(sampling_regions)
-
-print "Generating random genomic positions..."
-random_positions = []
-for i in range(1,GEN_DIST_SIZE*2):
-    if i % 100000 == 0: print i, "random positions generated."
-    random_positions.append(rand_pos_gen.next())
-
-
-max_read_len = 0
-for file_index, bam_file in enumerate(bam_files):
-    read_len = 0
-    for i, read in enumerate(bam_file.fetch(until_eof=True)):
-        if i > MAX_READS: break
-        read_len = max(read_len, read.query_length)
-
-    general_dist = []
-    avg_depth = 0
-    samplings = 0
-    rnd_i = 0
-    for e in random_positions:
-        if len(general_dist) > GEN_DIST_SIZE: break
-
-        chr, pos = e
-        rnd_i += 1
-
-        samplings += 1
-        i = 0
-        used = set()
-        for read in bam_file.fetch(contig=chr, start=pos, end=pos+10000):
-            if read.reference_start < pos:
-                avg_depth += 1
-            if (read.reference_start, read.next_reference_start) in used: continue # try not to use duplicates
-
-            if read.is_proper_pair and not read.is_secondary and not read.is_supplementary and \
-            0 < read.template_length < MAX_ACCEPTABLE_IS and 'S' not in read.cigarstring and 'S' not in read.get_tag('MC'):
-                if i > 100: break
-                i += 1
-                general_dist.append(read.template_length)
-                used.add((read.reference_start, read.next_reference_start))
-
-    mean_is = np.mean(general_dist)
-    stddev_is = np.std(general_dist)
-    avg_depth = float(avg_depth)/samplings;
-
-    print "Average depth:", avg_depth
-
-    general_dist = [x for x in general_dist if abs(x-mean_is) < 8*stddev_is]
-
-    mean_is = int(np.mean(general_dist))
-    lower_stddev_is = int(np.sqrt(np.mean([(mean_is-x)**2 for x in general_dist if x < mean_is])))
-    higher_stddev_is = int(np.sqrt(np.mean([(x-mean_is)**2 for x in general_dist if x > mean_is])))
-
-    min_is, max_is = mean_is-5*lower_stddev_is, mean_is+5*higher_stddev_is
-    print mean_is, min_is, max_is
-
-    folder = "%s/bam_%d/" % (cmd_args.workdir, file_index)
-    if not os.path.exists(folder):
-        os.makedirs(folder)
-
-    with open("%s/stats.txt" % folder, "w") as stat_file:
-        stat_file.write("filename %s\n" % bam_file.filename)
-        stat_file.write("min_is %d\n" % min_is)
-        stat_file.write("avg_is %d\n" % mean_is)
+    max_read_len, max_is = \
+        max_is_calc.get_max_is_from_fq(cmd_args.workdir, input_names[0], input_names[1], cmd_args.host_and_virus_reference, \
+                                            cmd_args.bwa, cmd_args.threads)
+    with open("%s/stats.txt" % bam_workspace, "w") as stat_file:
         stat_file.write("max_is %d\n" % max_is)
-        stat_file.write("read_len %d\n" % read_len)
+    config_file.write("read_len %d\n" % max_read_len)
+    config_file.close();
 
-    max_read_len = max(max_read_len, read_len)
+    isolate_cmd = "./isolate_relevant_pairs_fq %s %s %s %s %s %s " % (input_names[0], input_names[1], cmd_args.host_reference,
+                                                        cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
+    execute(isolate_cmd)
+else:
+    bam_files = [pysam.AlignmentFile(bam_name) for bam_name in input_names]
+    max_read_len, max_is_list = \
+        max_is_calc.get_max_is_from_bam(cmd_args.host_reference, bam_files, cmd_args.wgs, cmd_args.covered_regions_bed)
+    config_file.write("read_len %d\n" % max_read_len)
+    config_file.close();
 
-config_file.write("read_len %d\n" % max_read_len)
-config_file.close();
+    for file_index, bam_file in enumerate(bam_files):
+        bam_workspace = "%s/bam_%d/" % (cmd_args.workdir, file_index)
+        if not os.path.exists(bam_workspace):
+            os.makedirs(bam_workspace)
+        bam_workspaces.append(bam_workspace)
+
+        max_is = max_is_list[file_index]
+        with open("%s/stats.txt" % bam_workspace, "w") as stat_file:
+            stat_file.write("max_is %d\n" % max_is)
+
+        isolate_cmd = "./isolate_relevant_pairs %s %s %s %s %s" % (bam_file.filename, cmd_args.host_reference,
+                                                                   cmd_args.virus_reference, cmd_args.workdir,
+                                                                   bam_workspace)
+        execute(isolate_cmd)
+
+        filter_by_qname_cmd = "./filter_by_qname %s %s %s" % (bam_file.filename, cmd_args.workdir, bam_workspace)
+        execute(filter_by_qname_cmd)
 
 
 def map_clips(prefix, reference):
@@ -212,19 +133,7 @@ def map_clips(prefix, reference):
 
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s.cs.bam" % prefix, "%s.bam" % prefix)
 
-
-bam_workspaces = []
-for file_index, bam_file in enumerate(bam_files):
-    bam_workspace = "%s/bam_%d/" % (cmd_args.workdir, file_index)
-    bam_workspaces.append(bam_workspace)
-
-    isolate_cmd = "./isolate_relevant_pairs %s %s %s %s %s" % (bam_file.filename, cmd_args.host_reference,
-                                                            cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
-    execute(isolate_cmd)
-
-    filter_by_qname_cmd = "./filter_by_qname %s %s %s" % (bam_file.filename, cmd_args.workdir, bam_workspace)
-    execute(filter_by_qname_cmd)
-
+for bam_workspace in bam_workspaces:
     bwa_cmd = "%s mem -t %d %s %s/retained-pairs_1.fq %s/retained-pairs_2.fq | %s view -b -F 2304 > %s/retained-pairs.remapped.bam" \
               % (cmd_args.bwa, cmd_args.threads, cmd_args.host_and_virus_reference, \
                  bam_workspace, bam_workspace, cmd_args.samtools, bam_workspace)
@@ -262,16 +171,12 @@ for file_index, bam_file in enumerate(bam_files):
     execute(bwa_cmd)
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-side.cs.bam" % bam_workspace, "%s/host-side.bam" % bam_workspace)
 
-
 readsx = cmd_args.workdir + "/readsx"
 if not os.path.exists(readsx):
     os.makedirs(readsx)
 
-
-bam_files_and_workspaces = " ".join([bam_files[i].filename + " " + bam_workspaces[i] for i in xrange(len(bam_workspaces))])
 bam_workspaces_str = " ".join(bam_workspaces)
-
-merge_retained_reads_cmd = "./merge_retained_reads %s %s" % (cmd_args.workdir, bam_files_and_workspaces)
+merge_retained_reads_cmd = "./merge_retained_reads %s %s" % (cmd_args.workdir, bam_workspaces_str)
 execute(merge_retained_reads_cmd)
 
 build_rr_associations_cmd = "./build_region-reads_associations %s %s %s %s" \
@@ -292,13 +197,13 @@ with open(cmd_args.workdir + "/results.txt") as results_file:
         execute("%s index %s" % (cmd_args.samtools, "%s.bam" % bam_prefix))
 
 bp_consensus_cmd = "./bp_region_consensus_builder %s %s %s %s" \
-                   % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, " ".join(bam_workspaces))
+                   % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, bam_workspaces_str)
 execute(bp_consensus_cmd)
 
-dust_cmd = "%s %s/host_bp_seqs.fa > %s/host_bp_seqs.masked.fa" % (cmd_args.dust, cmd_args.workdir, cmd_args.workdir)
+dust_cmd = "%s %s/host_bp_seqs.fa > %s/host_bp_seqs.masked.bed" % (cmd_args.dust, cmd_args.workdir, cmd_args.workdir)
 execute(dust_cmd)
 
-dust_cmd = "%s %s/virus_bp_seqs.fa > %s/virus_bp_seqs.masked.fa" % (cmd_args.dust, cmd_args.workdir, cmd_args.workdir)
+dust_cmd = "%s %s/virus_bp_seqs.fa > %s/virus_bp_seqs.masked.bed" % (cmd_args.dust, cmd_args.workdir, cmd_args.workdir)
 execute(dust_cmd)
 
 filter_cmd = "./filter %s > %s/results.t1.txt" % (cmd_args.workdir, cmd_args.workdir)

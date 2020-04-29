@@ -263,7 +263,6 @@ int main(int argc, char* argv[]) {
         for (bam1_t* read : virus_reads) {
             if (!is_primary(read)) continue;
 
-            std::cerr << bam_get_qname(read) << " " << is_low_complexity(read, false, get_left_clip_len(read), read->core.l_qseq-get_right_clip_len(read)) << std::endl;
             if (is_low_complexity(read, false, get_left_clip_len(read), read->core.l_qseq-get_right_clip_len(read)))
                 continue;
             if (good_host_reads.count(bam_get_qname(read)) == 0) continue;

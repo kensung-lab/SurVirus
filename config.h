@@ -35,7 +35,7 @@ config_t parse_config(std::string file) {
 
 
 struct stats_t {
-    int min_is, max_is;
+    int max_is;
 };
 
 stats_t parse_stats(std::string file) {
@@ -48,7 +48,6 @@ stats_t parse_stats(std::string file) {
     fin.close();
 
     stats_t stats;
-    stats.min_is = stoi(config_params["min_is"]);
     stats.max_is = stoi(config_params["max_is"]);
     return stats;
 }

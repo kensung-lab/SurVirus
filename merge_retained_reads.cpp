@@ -120,10 +120,9 @@ void mark_duplicates(std::vector<bam1_t*>& host_reads, std::vector<bam1_t*>& vir
 int main(int argc, char* argv[]) {
 
     std::string workdir = argv[1];
-    std::vector<std::string> workspaces, bam_fnames;
-    for (int i = 2; i < argc; i+=2) {
-        bam_fnames.push_back(argv[i]);
-        workspaces.push_back(argv[i+1]);
+    std::vector<std::string> workspaces;
+    for (int i = 2; i < argc; i++) {
+        workspaces.push_back(argv[i]);
     }
 
     contig_map = contig_map_t(workdir);

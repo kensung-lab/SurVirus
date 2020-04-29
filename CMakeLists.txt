@@ -10,6 +10,9 @@ include_directories(sparsehash-sparsehash-2.0.3/include)
 set(ISOLATE_RELEVANT_PAIRS_SRC isolate_relevant_pairs.cpp)
 add_executable(isolate_relevant_pairs ${ISOLATE_RELEVANT_PAIRS_SRC})
 
+set(ISOLATE_RELEVANT_PAIRS_FQ_SRC isolate_relevant_pairs_fq.cpp)
+add_executable(isolate_relevant_pairs_fq ${ISOLATE_RELEVANT_PAIRS_FQ_SRC})
+
 set(FILTER_BY_QNAME_SRC filter_by_qname.cpp)
 add_executable(filter_by_qname ${FILTER_BY_QNAME_SRC})
 
@@ -38,7 +41,10 @@ set(GET_REALIGNMENTS_FOR_QNAME get-realignments-for-qname.cpp)
 add_executable(get-realignments-for-qname ${GET_REALIGNMENTS_FOR_QNAME})
 
 find_library(HTS_LIB hts PATHS htslib-1.9/lib NO_DEFAULT_PATH)
+find_package(ZLIB)
 target_link_libraries(isolate_relevant_pairs "${HTS_LIB}")
+target_link_libraries(isolate_relevant_pairs_fq "${HTS_LIB}")
+target_link_libraries(isolate_relevant_pairs_fq ZLIB::ZLIB)
 target_link_libraries(filter_by_qname "${HTS_LIB}")
 target_link_libraries(extract_clips "${HTS_LIB}")
 target_link_libraries(reads_categorizer "${HTS_LIB}")

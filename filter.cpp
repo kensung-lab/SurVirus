@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <cstring>
 #include <htslib/sam.h>
@@ -69,16 +70,25 @@ int main(int argc, char* argv[]) {
     FILE* host_bp_fasta = fopen(host_bp_seqs_fname.c_str(), "r"), *virus_bp_fasta = fopen(virus_bp_seqs_fname.c_str(), "r");
     kseq_t* hseq = kseq_init(fileno(host_bp_fasta)), *vseq = kseq_init(fileno(virus_bp_fasta));
     std::vector<std::pair<std::string, std::string> > host_virus_bp_seqs;
+    std::vector<std::pair<int, int> > host_virus_bp_Ns;
     while (kseq_read(hseq) >= 0 && kseq_read(vseq) >= 0) {
         host_virus_bp_seqs.push_back({hseq->seq.s, vseq->seq.s});
+        host_virus_bp_Ns.push_back({0, 0});
     }
 
-    host_bp_seqs_fname = workdir + "/host_bp_seqs.masked.fa", virus_bp_seqs_fname = workdir + "/virus_bp_seqs.masked.fa";
-    host_bp_fasta = fopen(host_bp_seqs_fname.c_str(), "r"), virus_bp_fasta = fopen(virus_bp_seqs_fname.c_str(), "r");
-    hseq = kseq_init(fileno(host_bp_fasta)), vseq = kseq_init(fileno(virus_bp_fasta));
-    std::vector<std::pair<std::string, std::string> > host_virus_bp_seqs_masked;
-    while (kseq_read(hseq) >= 0 && kseq_read(vseq) >= 0) {
-        host_virus_bp_seqs_masked.push_back({hseq->seq.s, vseq->seq.s});
+    std::string host_bp_seqs_masks_fname = workdir + "/host_bp_seqs.masked.bed",
+                virus_bp_seqs_masks_fname = workdir + "/virus_bp_seqs.masked.bed";
+    std::ifstream host_bp_masks_fin(host_bp_seqs_masks_fname), virus_bp_masks_fin(virus_bp_seqs_masks_fname);
+    std::vector<std::pair<int, int> > host_virus_bp_seqs_masked;
+    std::string id;
+    int start, end;
+    while (host_bp_masks_fin >> id >> start >> end) {
+        int n = std::stoi(id.substr(0, id.length()-2));
+        host_virus_bp_Ns[n].first = end-start+1;
+    }
+    while (virus_bp_masks_fin >> id >> start >> end) {
+        int n = std::stoi(id.substr(0, id.length()-2));
+        host_virus_bp_Ns[n].second = end-start+1;
     }
 
     std::vector<call_t> accepted_calls, rejected_calls;
@@ -90,8 +100,8 @@ int main(int argc, char* argv[]) {
         if (call.host_pbs < min_host_pbs) accept = false;
         if (call.good_pairs < min_pairs-1 || (call.good_pairs == min_pairs-1 && call.split_reads == 0)) accept = false;
 
-        std::string host_seq = host_virus_bp_seqs_masked[call.id].first;
-        std::string virus_seq = host_virus_bp_seqs_masked[call.id].second;
+        std::string host_seq = host_virus_bp_seqs[call.id].first;
+        std::string virus_seq = host_virus_bp_seqs[call.id].second;
         if (host_seq.length() < config.read_len/2 || virus_seq.length() < config.read_len/2) {
             accept = false;
         }
@@ -99,8 +109,8 @@ int main(int argc, char* argv[]) {
         if (call.coverage() >= min_cov_for_accept && call.good_pairs > 2) accept = true;
         if (accept_clipped && call.split_reads > 0) accept = true;
 
-        int host_Ns = std::count(host_seq.begin(), host_seq.end(), 'N');
-        int virus_Ns = std::count(virus_seq.begin(), virus_seq.end(), 'N');
+        int host_Ns = host_virus_bp_Ns[call.id].first;
+        int virus_Ns = host_virus_bp_Ns[call.id].second;
         if (double(host_Ns)/host_seq.length() > 0.80 || double(virus_Ns)/virus_seq.length() > 0.80) {
             accept = false;
         }
