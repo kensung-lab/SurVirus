@@ -1,10 +1,14 @@
 import pyfaidx, os, gzip, pysam
-import numpy as np
+import math
+
 from random_pos_generator import RandomPositionGenerator
 
 MAX_READS = 1000
 MAX_ACCEPTABLE_IS = 20000
 GEN_DIST_SIZE = 10000
+
+def mean(l):
+    return sum(l)/float(len(l))
 
 def get_sampling_regions_from_bam(reference, bam_file, wgs, covered_regions_bed_file):
     sampling_regions = []
@@ -69,8 +73,8 @@ def get_max_is_from_bam(reference_path, bam_files, wgs, covered_regions_bed_file
                     general_dist.append(read.template_length)
                     used.add((read.reference_start, read.next_reference_start))
 
-        mean_is = int(np.mean(general_dist))
-        higher_stddev_is = int(np.sqrt(np.mean([(x - mean_is) ** 2 for x in general_dist if x > mean_is])))
+        mean_is = int(mean(general_dist))
+        higher_stddev_is = int(math.sqrt(mean([(x - mean_is) ** 2 for x in general_dist if x > mean_is])))
 
         max_is = mean_is + 5 * higher_stddev_is
         max_is_list.append(max_is)
@@ -109,8 +113,8 @@ def get_max_is_from_fq(workdir, fq1, fq2, reference, bwa_exec, threads):
 
             if len(general_dist) > GEN_DIST_SIZE: break
 
-        mean_is = int(np.mean(general_dist))
-        higher_stddev_is = int(np.sqrt(np.mean([(x - mean_is) ** 2 for x in general_dist if x > mean_is])))
+        mean_is = int(mean(general_dist))
+        higher_stddev_is = int(math.sqrt(mean([(x - mean_is) ** 2 for x in general_dist if x > mean_is])))
 
         max_is = mean_is + 5 * higher_stddev_is
     return max_read_len, max_is

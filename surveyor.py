@@ -1,7 +1,5 @@
 import argparse, os
 import pysam, pyfaidx
-from random_pos_generator import RandomPositionGenerator
-import numpy as np
 import max_is_calc
 
 cmd_parser = argparse.ArgumentParser(description='SurVirus, a virus integration caller.')
