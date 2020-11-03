@@ -21,10 +21,17 @@ SurVirus needs three references:
 2) the virus(es) reference, one fasta sequence per virus
 3) a concatenation of the host genome and the viruses genomes
 
-Each of the references should be indexed with bwa and samtools, i.e.
+Each of the references should be indexed with bwa and samtools. For example, suppose the host genome is contained in a file host.fa, and the virus genomes are in virus.fa. You should run
 ```
-bwa index ref.fa
-samtools faidx ref.fa
+bwa index host.fa
+samtools faidx host.fa
+
+bwa index virus.fa
+samtools faidx virus.fa
+
+cat host.fa virus.fa > host+virus.fa
+bwa index host+virus.fa
+samtools faidx host+virus.fa
 ```
 
 ## Required software
