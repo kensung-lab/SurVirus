@@ -139,8 +139,8 @@ struct call_t {
 
     std::string to_human_string() {
         char buffer[10000];
-        sprintf(buffer, "ID=%d %s %s GOOD_PAIRS=%d TOT_READS=%d SPLIT_READS=%d HOST_PBS=%lf COVERAGE=%lf",
-                id, host_bp.to_human_string().c_str(), virus_bp.to_human_string().c_str(), good_pairs, reads, split_reads, host_pbs, coverage());
+        sprintf(buffer, "ID=%d %s %s SUPPORTING_PAIRS=%d SPLIT_READS=%d HOST_PBS=%lf COVERAGE=%lf",
+                id, host_bp.to_human_string().c_str(), virus_bp.to_human_string().c_str(), good_pairs, split_reads, host_pbs, coverage());
         std::string sout = buffer;
         if (is_paired()) sout += " PAIRED WITH ID=" + std::to_string(paired_with);
         return sout;
