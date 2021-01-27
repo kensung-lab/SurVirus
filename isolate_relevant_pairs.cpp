@@ -116,7 +116,7 @@ void index_seq(char* seq, size_t len) {
     }
 }
 
-void isolate(int id, char* bam_fname, char* contig) {
+void isolate_bam(int id, char* bam_fname, char* contig) {
 
     open_samFile_t* bam_file = open_samFile(bam_fname, false);
 
@@ -194,6 +194,9 @@ int main(int argc, char* argv[]) {
     fastaf = fopen(virus_ref.c_str(), "r");
     seq = kseq_init(fileno(fastaf));
     while ((l = kseq_read(seq)) >= 0) {
+        for (int i = 0; i < seq->seq.l; i++) {
+            seq->seq.s[i] = toupper(seq->seq.s[i]);
+        }
         index_seq(seq->seq.s, seq->seq.l);
         get_rc(seq->seq.s, seq->seq.l);
         index_seq(seq->seq.s, seq->seq.l);
@@ -213,7 +216,7 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::future<void> > futures;
     for (int t = 0; t < bam_file->header->n_targets; t++) {
-        std::future<void> future = thread_pool.push(isolate, bam_file->file->fn, bam_file->header->target_name[t]);
+        std::future<void> future = thread_pool.push(isolate_bam, bam_file->file->fn, bam_file->header->target_name[t]);
         futures.push_back(std::move(future));
     }
     thread_pool.stop(true);

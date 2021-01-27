@@ -211,7 +211,7 @@ std::string get_qualities(bam1_t* r, bool original_quals = false) {
     char* q = (char*) bam_get_qual(r);
     for (int i = 0; i < r->core.l_qseq; i++) {
         quals[i] = q[i]+33;
-    }
+    } quals[r->core.l_qseq] = '\0';
     if (original_quals && bam_is_rev(r)) reverse(quals, r->core.l_qseq);
     return quals;
 }

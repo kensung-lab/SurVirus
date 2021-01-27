@@ -227,6 +227,9 @@ int main(int argc, char* argv[]) {
     gzFile fastaf = gzopen(virus_ref.c_str(), "r");
     kseq_t* seq = kseq_init(fastaf);
     while (kseq_read(seq) >= 0) {
+        for (int i = 0; i < seq->seq.l; i++) {
+            seq->seq.s[i] = toupper(seq->seq.s[i]);
+        }
         index_seq(seq->seq.s, seq->seq.l);
         get_rc(seq->seq.s, seq->seq.l);
         index_seq(seq->seq.s, seq->seq.l);
