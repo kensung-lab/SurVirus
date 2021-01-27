@@ -38,7 +38,7 @@ samtools faidx host+virus.fa
 
 Python 2 and libraries NumPy (http://www.numpy.org/), PyFaidx (https://github.com/mdshw5/pyfaidx) and PySam (https://github.com/pysam-developers/pysam) are required. 
 
-Recent versions of samtools, bedtools, bwa and sdust are required. The latest versions at the moment of writing are 1.10 for samtools, 2.29 for bedtools, 0.7.17 for bwa.
+Recent versions of samtools, bwa and sdust are required. The latest versions at the moment of writing are 1.10 for samtools, 0.7.17 for bwa.
 For sdust, we recommend the implementation at https://github.com/lh3/sdust
 
 ## Running
