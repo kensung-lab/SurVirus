@@ -199,8 +199,8 @@ int main(int argc, char* argv[]) {
 
             int virus_start = 1000000000, virus_end = 0;
             for (bam1_t* read : virus_reads) {
-                virus_start = std::min(virus_start, read->core.pos);
-                virus_end = std::max(virus_end, bam_endpos(read));
+                virus_start = std::min(virus_start, (int) read->core.pos);
+                virus_end = std::max(virus_end, (int) bam_endpos(read));
             }
 
             char virus_reg[10000];

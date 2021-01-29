@@ -2,11 +2,13 @@
 #include <unordered_set>
 #include <htslib/sam.h>
 #include <htslib/hts.h>
+#include <htslib/faidx.h>
 
 #include "sam_utils.h"
 #include "config.h"
 #include "libs/cptl_stl.h"
 
+config_t config;
 
 struct fastq_entry_t {
     std::string qname;
@@ -32,6 +34,11 @@ void write_fq(std::ofstream& fout, fastq_entry_t* fq_entry) {
 void filter_by_qname(int id, char* bam_fname, char* contig) {
 
     open_samFile_t* bam_file = open_samFile(bam_fname, false);
+    if (!config.cram_reference.empty()) {
+        if (hts_set_fai_filename(bam_file->file, fai_path(config.cram_reference.c_str())) != 0) {
+            throw "Failed to read reference " + config.cram_reference;
+        }
+    }
 
     hts_itr_t* iter = sam_itr_querys(bam_file->idx, bam_file->header, contig);
 
@@ -81,7 +88,7 @@ int main(int argc, char* argv[]) {
     fq1.open(workspace + "/retained-pairs_1.fq");
     fq2.open(workspace + "/retained-pairs_2.fq");
 
-    config_t config = parse_config(workdir + "/config.txt");
+    config = parse_config(workdir + "/config.txt");
 
     ctpl::thread_pool thread_pool(config.threads);
 

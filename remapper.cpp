@@ -1104,8 +1104,8 @@ int main(int argc, char* argv[]) {
         std::vector<double> virus_score_ratios;
         for (read_realignment_t& rr : kept_virus_read_realignments) {
             virus_score_ratios.push_back(rr.score/double(rr.offset_end-rr.offset_start+1));
-            v_min_pos = std::min(v_min_pos, rr.read->core.pos);
-            v_max_pos = std::max(v_max_pos, bam_endpos(rr.read));
+            v_min_pos = std::min(v_min_pos, (int) rr.read->core.pos);
+            v_max_pos = std::max(v_max_pos, (int) bam_endpos(rr.read));
         }
         std::string virus_chr = contig_map.id2name(best_virus_region.first->contig_id);
         bool virus_rev = !best_virus_region.second;
@@ -1127,8 +1127,8 @@ int main(int argc, char* argv[]) {
         int score = 0;
         int h_min_pos = 1000000000, h_max_pos = 0;
         for (read_realignment_t& rr : kept_host_read_realignments) {
-            h_min_pos = std::min(h_min_pos, rr.read->core.pos);
-            h_max_pos = std::max(h_max_pos, bam_endpos(rr.read));
+            h_min_pos = std::min(h_min_pos, (int) rr.read->core.pos);
+            h_max_pos = std::max(h_max_pos, (int) bam_endpos(rr.read));
             score += rr.score;
         }
         std::string host_chr = contig_map.id2name(best_region->contig_id);

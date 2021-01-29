@@ -1,5 +1,5 @@
-unzip htslib-1.9.zip
-cd htslib-1.9
+unzip htslib-1.11.zip
+cd htslib-1.11
 autoheader
 autoconf
 ./configure --prefix=`pwd`

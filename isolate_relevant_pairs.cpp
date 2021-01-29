@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <htslib/sam.h>
 #include <htslib/kseq.h>
+#include <htslib/faidx.h>
 #include "libs/cptl_stl.h"
 
 #define USE_BITSET
@@ -119,6 +120,11 @@ void index_seq(char* seq, size_t len) {
 void isolate_bam(int id, char* bam_fname, char* contig) {
 
     open_samFile_t* bam_file = open_samFile(bam_fname, false);
+    if (!config.cram_reference.empty()) {
+        if (hts_set_fai_filename(bam_file->file, fai_path(config.cram_reference.c_str())) != 0) {
+            throw "Failed to read reference " + config.cram_reference;
+        }
+    }
 
     bool is_host = host_names.count(contig);
 
@@ -204,11 +210,10 @@ int main(int argc, char* argv[]) {
     kseq_destroy(seq);
     fclose(fastaf);
 
-    open_samFile_t* bam_file = open_samFile(bam_fname.c_str());
-
     nucl2chr[1] = 'A'; nucl2chr[2] = 'C'; nucl2chr[4] = 'G'; nucl2chr[8] = 'T'; nucl2chr[15] = 'N';
-
     config = parse_config(workdir + "/config.txt");
+
+    open_samFile_t* bam_file = open_samFile(bam_fname.c_str());
 
     ctpl::thread_pool thread_pool(config.threads);
 

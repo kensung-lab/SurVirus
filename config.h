@@ -14,6 +14,7 @@ struct config_t {
     int threads;
     int min_sc_size, max_sc_dist;
     int read_len;
+    std::string cram_reference;
 };
 
 config_t parse_config(std::string file) {
@@ -30,6 +31,9 @@ config_t parse_config(std::string file) {
     config.min_sc_size = stoi(config_params["min_sc_size"]);
     config.max_sc_dist = stoi(config_params["max_sc_dist"]);
     config.read_len = stoi(config_params["read_len"]);
+    if (config_params.count("cram_reference")) {
+        config.cram_reference = config_params["cram_reference"];
+    }
     return config;
 };
 

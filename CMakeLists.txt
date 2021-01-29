@@ -4,7 +4,7 @@ project(SurVirus)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pthread")
 
-include_directories(htslib-1.9/include)
+include_directories(htslib-1.11/include)
 include_directories(sparsehash-sparsehash-2.0.3/include)
 
 set(ISOLATE_RELEVANT_PAIRS_SRC isolate_relevant_pairs.cpp)
@@ -40,7 +40,7 @@ add_executable(filter ${FILTER_SRC})
 set(GET_REALIGNMENTS_FOR_QNAME get-realignments-for-qname.cpp)
 add_executable(get-realignments-for-qname ${GET_REALIGNMENTS_FOR_QNAME})
 
-find_library(HTS_LIB hts PATHS htslib-1.9/lib NO_DEFAULT_PATH)
+find_library(HTS_LIB hts PATHS htslib-1.11/lib NO_DEFAULT_PATH)
 find_package(ZLIB)
 target_link_libraries(isolate_relevant_pairs "${HTS_LIB}")
 target_link_libraries(isolate_relevant_pairs_fq "${HTS_LIB}")

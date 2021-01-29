@@ -11,8 +11,6 @@ cmd_parser.add_argument('host_and_virus_reference', help='Joint references of ho
 cmd_parser.add_argument('--threads', type=int, default=1, help='Number of threads to be used.')
 cmd_parser.add_argument('--bwa', default='bwa', help='BWA path.')
 cmd_parser.add_argument('--samtools', help='Samtools path.', default='samtools')
-cmd_parser.add_argument('--bedtools', default='bedtools', help='Bedtools path. Necessary if --wgs is not set and'
-                                                               '--coveredRegionsBed is not provided.')
 cmd_parser.add_argument('--dust', help='Dust path.', default='dust')
 cmd_parser.add_argument('--wgs', action='store_true', help='The reference genome is uniformly covered by reads.'
                                                            'SurVirus needs to sample read pairs, and this option lets'
@@ -24,6 +22,8 @@ cmd_parser.add_argument('--covered_regions_bed', default='',
 cmd_parser.add_argument('--minClipSize', type=int, default=20, help='Min size for a clip to be considered.')
 cmd_parser.add_argument('--maxSCDist', type=int, default=10, help='Max SC distance.')
 cmd_parser.add_argument('--fq', action='store_true', help='Input is in fastq format.')
+cmd_parser.add_argument('--cram-reference', help='Can optionally provide a reference for decoding the input file(s) if '
+                                                 'in CRAM.')
 cmd_args = cmd_parser.parse_args()
 
 def execute(cmd):
@@ -41,7 +41,8 @@ config_file = open(cmd_args.workdir + "/config.txt", "w")
 config_file.write("threads %d\n" % cmd_args.threads)
 config_file.write("min_sc_size %d\n" % cmd_args.minClipSize)
 config_file.write("max_sc_dist %d\n" % cmd_args.maxSCDist)
-
+if cmd_args.cram_reference:
+    config_file.write("cram_reference %s\n" % cmd_args.cram_reference)
 
 # Generate general distribution of insert sizes
 contig_map = open("%s/contig_map" % cmd_args.workdir, "w")
@@ -79,7 +80,10 @@ if cmd_args.fq:
                                                         cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
     execute(isolate_cmd)
 else:
-    bam_files = [pysam.AlignmentFile(bam_name) for bam_name in input_names]
+    if cmd_args.cram_reference:
+        bam_files = [pysam.AlignmentFile(bam_name, reference_filename=cmd_args.cram_reference) for bam_name in input_names]
+    else:
+        bam_files = [pysam.AlignmentFile(bam_name) for bam_name in input_names]
     max_read_len, max_is_list = \
         max_is_calc.get_max_is_from_bam(cmd_args.host_reference, bam_files, cmd_args.wgs, cmd_args.covered_regions_bed)
     config_file.write("read_len %d\n" % max_read_len)
