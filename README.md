@@ -63,9 +63,9 @@ In the next release we will target support for multiple pairs of fastq files.
 
 If data is whole-genome sequencing, the flag --wgs should be provided. This is not mandatory (i.e. SurVirus will run anyway), but recommended.
 
-If samtools, bedtools, bwa or sdust are not in your PATH, or if you wish to provide an alternative location for either of them, you can do so with the --samtools, --bedtools, --bwa and --dust flags
+If samtools, bwa or sdust are not in your PATH, or if you wish to provide an alternative location for either of them, you can do so with the --samtools, --bwa and --dust flags
 ```
-python surveyor input_files /path/to/empty/workdir /path/to/host/reference /path/to/virus/reference /path/to/host+virus/reference --samtools /path/to/samtools --bedtools /path/to/bedtools --bwa /path/to/bwa --dust /path/to/sdust
+python surveyor input_files /path/to/empty/workdir /path/to/host/reference /path/to/virus/reference /path/to/host+virus/reference --samtools /path/to/samtools --bwa /path/to/bwa --dust /path/to/sdust
 ```
 
 Finally, an useful flag is --threads, which you can use to specify the number of threads you wish to assign to SurVirus. The default is 1.
