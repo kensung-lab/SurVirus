@@ -187,33 +187,22 @@ int main(int argc, char* argv[]) {
         virus_bp_seqs << ">" << call.id << "_" << (call.virus_bp.rev ? "L" : "R") << "\n";
         std::string consensus_virus = "A";
         if (!virus_reads.empty()) {
-            // if circular call, move reads to second half
-            int virus_len = chr_seqs.get_original_len(call.virus_bp.chr);
-            if ((!call.virus_bp.rev && call.virus_bp.pos() < max_is) || (call.virus_bp.rev && call.virus_bp.pos() > virus_len-max_is)) {
-                for (bam1_t* read : virus_reads) {
-                    if (bam_endpos(read) <= max_is) {
-                        read->core.pos += virus_len;
-                    }
-                }
-            }
-
             int virus_start = 1000000000, virus_end = 0;
             for (bam1_t* read : virus_reads) {
                 virus_start = std::min(virus_start, (int) read->core.pos);
                 virus_end = std::max(virus_end, (int) bam_endpos(read));
             }
+            int virus_len = chr_seqs.get_len(call.virus_bp.chr);
+            if (virus_end >= virus_len) virus_end = virus_len-1;
 
             char virus_reg[10000];
             strncpy(virus_reg, chr_seqs.get_seq(call.virus_bp.chr)+virus_start, virus_end-virus_start);
             virus_reg[virus_end-virus_start] = '\0';
-            consensus_virus = build_consensus(virus_reg, call.virus_bp.start, virus_reads);
+            consensus_virus = build_consensus(virus_reg, virus_start, virus_reads);
         }
         virus_bp_seqs << consensus_virus << std::endl;
 
-
-
         /* == remap reads == */
-
         StripedSmithWaterman::Aligner aligner(1, 4, 6, 1, false);
         StripedSmithWaterman::Filter filter;
 

@@ -203,10 +203,12 @@ struct chr_seqs_map_t {
                 char* chr_seq = new char[seq->seq.l + seq->seq.l/2 + 1];
                 strcpy(chr_seq, seq->seq.s);
                 strncpy(chr_seq+seq->seq.l, seq->seq.s, seq->seq.l/2);
+                chr_seq[seq->seq.l + seq->seq.l/2] = '\0';
                 seqs[seq_name] = new chr_seq_t(chr_seq, seq->seq.l + seq->seq.l/2, true, is_virus);
             } else {
                 char* chr_seq = new char[seq->seq.l + 1];
                 strcpy(chr_seq, seq->seq.s);
+                chr_seq[seq->seq.l] = '\0';
                 seqs[seq_name] = new chr_seq_t(chr_seq, seq->seq.l, false, is_virus);
             }
         }
