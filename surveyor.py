@@ -26,6 +26,8 @@ cmd_parser.add_argument('--cram-reference', help='Can optionally provide a refer
                                                  'in CRAM.')
 cmd_args = cmd_parser.parse_args()
 
+SURVIRUS_PATH = os.path.dirname(os.path.realpath(__file__))
+
 def execute(cmd):
     print "Executing:", cmd
     os.system(cmd)
@@ -76,8 +78,9 @@ if cmd_args.fq:
     config_file.write("read_len %d\n" % max_read_len)
     config_file.close();
 
-    isolate_cmd = "./isolate_relevant_pairs_fq %s %s %s %s %s %s " % (input_names[0], input_names[1], cmd_args.host_reference,
-                                                        cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
+    isolate_cmd = "%s/isolate_relevant_pairs_fq %s %s %s %s %s %s " % \
+                  (SURVIRUS_PATH, input_names[0], input_names[1], cmd_args.host_reference,
+                   cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
     execute(isolate_cmd)
 else:
     if cmd_args.cram_reference:
@@ -99,12 +102,12 @@ else:
         with open("%s/stats.txt" % bam_workspace, "w") as stat_file:
             stat_file.write("max_is %d\n" % max_is)
 
-        isolate_cmd = "./isolate_relevant_pairs %s %s %s %s %s" % (bam_file.filename, cmd_args.host_reference,
+        isolate_cmd = "%s/isolate_relevant_pairs %s %s %s %s %s" % (SURVIRUS_PATH, bam_file.filename, cmd_args.host_reference,
                                                                    cmd_args.virus_reference, cmd_args.workdir,
                                                                    bam_workspace)
         execute(isolate_cmd)
 
-        filter_by_qname_cmd = "./filter_by_qname %s %s %s" % (bam_file.filename, cmd_args.workdir, bam_workspace)
+        filter_by_qname_cmd = "%s/filter_by_qname %s %s %s" % (SURVIRUS_PATH, bam_file.filename, cmd_args.workdir, bam_workspace)
         execute(filter_by_qname_cmd)
 
 
@@ -145,7 +148,7 @@ for bam_workspace in bam_workspaces:
                         % (cmd_args.samtools, cmd_args.threads, bam_workspace, bam_workspace)
     execute(samtools_sort_cmd)
 
-    extract_clips_cmd = "./extract_clips %s %s %s" % (cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
+    extract_clips_cmd = "%s/extract_clips %s %s %s" % (SURVIRUS_PATH, cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
     execute(extract_clips_cmd)
 
     # map virus clips
@@ -154,7 +157,7 @@ for bam_workspace in bam_workspaces:
     # map host clips
     map_clips("%s/host-clips" % bam_workspace, cmd_args.virus_reference)
 
-    read_categorizer_cmd = "./reads_categorizer %s %s %s" % (cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
+    read_categorizer_cmd = "%s/reads_categorizer %s %s %s" % (SURVIRUS_PATH, cmd_args.virus_reference, cmd_args.workdir, bam_workspace)
     execute(read_categorizer_cmd)
     pysam.sort("-@", str(cmd_args.threads), "-o", "%s/host-anchors.cs.bam" % bam_workspace,
              "%s/host-anchors.bam" % bam_workspace)
@@ -178,15 +181,15 @@ if not os.path.exists(readsx):
     os.makedirs(readsx)
 
 bam_workspaces_str = " ".join(bam_workspaces)
-merge_retained_reads_cmd = "./merge_retained_reads %s %s" % (cmd_args.workdir, bam_workspaces_str)
+merge_retained_reads_cmd = "%s/merge_retained_reads %s %s" % (SURVIRUS_PATH, cmd_args.workdir, bam_workspaces_str)
 execute(merge_retained_reads_cmd)
 
-build_rr_associations_cmd = "./build_region-reads_associations %s %s %s %s" \
-                            % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, bam_workspaces_str)
+build_rr_associations_cmd = "%s/build_region-reads_associations %s %s %s %s" \
+                            % (SURVIRUS_PATH, cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, bam_workspaces_str)
 execute(build_rr_associations_cmd)
 
-remapper_cmd = "./remapper %s %s %s %s > %s/results.txt 2> %s/log.txt" \
-               % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir,
+remapper_cmd = "%s/remapper %s %s %s %s > %s/results.txt 2> %s/log.txt" \
+               % (SURVIRUS_PATH, cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir,
                   bam_workspaces_str, cmd_args.workdir, cmd_args.workdir)
 execute(remapper_cmd)
 
@@ -198,8 +201,8 @@ with open(cmd_args.workdir + "/results.txt") as results_file:
         os.rename("%s.cs.bam" % bam_prefix, "%s.bam" % bam_prefix)
         execute("%s index %s" % (cmd_args.samtools, "%s.bam" % bam_prefix))
 
-bp_consensus_cmd = "./bp_region_consensus_builder %s %s %s %s" \
-                   % (cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, bam_workspaces_str)
+bp_consensus_cmd = "%s/bp_region_consensus_builder %s %s %s %s" \
+                   % (SURVIRUS_PATH, cmd_args.host_reference, cmd_args.virus_reference, cmd_args.workdir, bam_workspaces_str)
 execute(bp_consensus_cmd)
 
 dust_cmd = "%s %s/host_bp_seqs.fa > %s/host_bp_seqs.masked.bed" % (cmd_args.dust, cmd_args.workdir, cmd_args.workdir)
@@ -208,13 +211,13 @@ execute(dust_cmd)
 dust_cmd = "%s %s/virus_bp_seqs.fa > %s/virus_bp_seqs.masked.bed" % (cmd_args.dust, cmd_args.workdir, cmd_args.workdir)
 execute(dust_cmd)
 
-filter_cmd = "./filter %s > %s/results.t1.txt" % (cmd_args.workdir, cmd_args.workdir)
+filter_cmd = "%s/filter %s > %s/results.t1.txt" % (SURVIRUS_PATH, cmd_args.workdir, cmd_args.workdir)
 execute(filter_cmd)
 
-filter_cmd = "./filter %s --remapped > %s/results.remapped.t1.txt" % (cmd_args.workdir, cmd_args.workdir)
+filter_cmd = "%s/filter %s --remapped > %s/results.remapped.t1.txt" % (SURVIRUS_PATH, cmd_args.workdir, cmd_args.workdir)
 execute(filter_cmd)
 
-filter_cmd = "./filter %s --print-rejected > %s/results.discarded.txt" % (cmd_args.workdir, cmd_args.workdir)
+filter_cmd = "%s/filter %s --print-rejected > %s/results.discarded.txt" % (SURVIRUS_PATH, cmd_args.workdir, cmd_args.workdir)
 execute(filter_cmd)
 
 
