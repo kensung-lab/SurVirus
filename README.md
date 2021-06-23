@@ -6,7 +6,7 @@ SurVirus has been compiled and tested with gcc 4.9.3, so we recommend this versi
 
 First of all, the required external libraries (downloaded with the source code) must be compiled with
 ```
-./build_htslib.sh
+./build_libs.sh
 ```
 
 Then, run
